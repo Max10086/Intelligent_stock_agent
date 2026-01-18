@@ -1,0 +1,62 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum JobStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+model BatchJob {
+  id          String         @id @default(uuid())
+  tickers     String         // Comma-separated list of tickers/queries
+  status      JobStatus      @default(PENDING)
+  language    String         @default("en")
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+  completedAt DateTime?
+  error       String?
+  
+  // Relationship to individual analysis jobs
+  jobs        AnalysisJob[]
+  
+  @@index([status])
+  @@index([createdAt])
+}
+
+model AnalysisJob {
+  id          String    @id @default(uuid())
+  batchJobId  String?
+  batchJob    BatchJob? @relation(fields: [batchJobId], references: [id], onDelete: Cascade)
+  ticker      String
+  query       String    // Original user query (e.g., "AAPL" or "Apple")
+  status      JobStatus @default(PENDING)
+  language    String    @default("en") // 'en' or 'cn'
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  startedAt   DateTime?
+  completedAt DateTime?
+  error       String?
+  
+  // Progress tracking
+  progress        Int       @default(0)   // 0 to 100
+  currentStep     String?   // e.g., "Analyzing Competitors", "Generating Questions", "Answering Question 3/10"
+  logs            String?   // Optional: JSON string array of log history
+  
+  // Analysis result data (stored as JSON)
+  result      String?   // JSON string of AnalysisState
+  
+  @@index([status])
+  @@index([createdAt])
+  @@index([batchJobId])
+}

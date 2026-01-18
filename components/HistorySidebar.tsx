@@ -8,6 +8,7 @@ interface HistorySidebarProps {
   isOpen: boolean;
   onClose: () => void;
   history: AnalysisState[];
+  isLoading?: boolean;
   onLoad: (id: string) => void;
   onDelete: (id: string) => void;
   onClearAll: () => void;
@@ -18,6 +19,7 @@ export const HistorySidebar: React.FC<HistorySidebarProps> = ({
   isOpen,
   onClose,
   history,
+  isLoading = false,
   onLoad,
   onDelete,
   onClearAll,
@@ -55,7 +57,16 @@ export const HistorySidebar: React.FC<HistorySidebarProps> = ({
             </button>
           </div>
 
-          {history.length > 0 ? (
+          {isLoading ? (
+            <div className="flex-grow flex items-center justify-center">
+              <div className="text-center">
+                <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-blue-400 mb-2"></div>
+                <p className="text-gray-400 text-sm">
+                  {currentLanguage === 'cn' ? '加载历史中...' : 'Loading history...'}
+                </p>
+              </div>
+            </div>
+          ) : history.length > 0 ? (
             <>
               <div className="flex-grow overflow-y-auto">
                 {history.map((item) => (

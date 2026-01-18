@@ -9,6 +9,8 @@ import { getUIText } from '../constants.ts';
 const ACTIVE_ANALYSIS_KEY = 'intelligentStockAgentActiveState';
 const HISTORY_KEY = 'intelligentStockAgentHistory';
 
+const API_BASE_URL = typeof window !== 'undefined' ? '' : 'http://localhost:3001';
+
 const createInitialState = (): AnalysisState => ({
   id: ``,
   timestamp: ``,
@@ -47,23 +49,40 @@ export const useStockAgent = () => {
     return initialState;
   });
 
-  const [history, setHistory] = useState<AnalysisState[]>(() => {
-    try {
-      const savedHistoryJSON = localStorage.getItem(HISTORY_KEY);
-      if (savedHistoryJSON) {
-        const parsed = JSON.parse(savedHistoryJSON);
-        // Deduplicate on load - keep only unique entries by id
-        const uniqueHistory = Array.from(
-          new Map(parsed.map((item: AnalysisState) => [item.id, item])).values()
-        );
-        return uniqueHistory;
+  const [history, setHistory] = useState<AnalysisState[]>([]);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(true);
+
+  // Fetch history from server on mount (100% server-based)
+  useEffect(() => {
+    const fetchServerHistory = async () => {
+      setIsLoadingHistory(true);
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/history`);
+        if (!response.ok) {
+          throw new Error('Failed to fetch server history');
+        }
+        const data = await response.json();
+        const serverHistory: AnalysisState[] = data.history || [];
+
+        // Sort by timestamp (most recent first)
+        const sortedHistory = serverHistory.sort((a, b) => {
+          const timeA = new Date(a.timestamp).getTime();
+          const timeB = new Date(b.timestamp).getTime();
+          return timeB - timeA;
+        });
+
+        setHistory(sortedHistory);
+      } catch (error) {
+        console.error('Could not fetch server history:', error);
+        // Set empty array on error
+        setHistory([]);
+      } finally {
+        setIsLoadingHistory(false);
       }
-      return [];
-    } catch (error) {
-      console.error('Could not load history from local storage', error);
-      return [];
-    }
-  });
+    };
+
+    fetchServerHistory();
+  }, []); // Only run on mount
 
   useEffect(() => {
     try {
@@ -77,26 +96,28 @@ export const useStockAgent = () => {
     }
   }, [analysisState]);
 
-  useEffect(() => {
+  // Refresh history from server (called after save/delete operations)
+  const refreshHistory = useCallback(async () => {
     try {
-      // Deduplicate history before saving to localStorage
-      // Use a Map to ensure unique entries by id (keeps the first occurrence)
-      const uniqueHistory = Array.from(
-        new Map(history.map(item => [item.id, item])).values()
-      );
-      
-      // Save deduplicated version to localStorage
-      localStorage.setItem(HISTORY_KEY, JSON.stringify(uniqueHistory));
-      
-      // If duplicates were found, log a warning but don't update state here
-      // to avoid infinite loop. The deduplication will happen on next load.
-      if (uniqueHistory.length !== history.length) {
-        console.warn(`Found ${history.length - uniqueHistory.length} duplicate history entries. They will be removed on next page load.`);
+      const response = await fetch(`${API_BASE_URL}/api/history`);
+      if (!response.ok) {
+        throw new Error('Failed to fetch server history');
       }
+      const data = await response.json();
+      const serverHistory: AnalysisState[] = data.history || [];
+
+      // Sort by timestamp (most recent first)
+      const sortedHistory = serverHistory.sort((a, b) => {
+        const timeA = new Date(a.timestamp).getTime();
+        const timeB = new Date(b.timestamp).getTime();
+        return timeB - timeA;
+      });
+
+      setHistory(sortedHistory);
     } catch (error) {
-      console.error('Could not save history to local storage', error);
+      console.error('Could not refresh history:', error);
     }
-  }, [history]);
+  }, []);
 
   const updateState = (update: Partial<AnalysisState>) => {
     setAnalysisState(prev => ({ ...prev, ...update }));
@@ -405,38 +426,47 @@ export const useStockAgent = () => {
             await delay(2000);
         }
 
-        // Update analysis state to complete and add to history
-        setAnalysisState(prevState => {
-            const finalState: AnalysisState = {
-                ...prevState,
-                status: 'complete',
-                currentStage: getUIText(lang).analysisComplete,
-                currentProgress: 100
-            };
-            
-            // Add to history only if not already present (prevent duplicates)
-            setHistory(prevHistory => {
-                // Check if this analysis already exists in history by id
-                const exists = prevHistory.some(item => item.id === finalState.id);
-                if (exists) {
-                    // If exists, update it instead of adding duplicate
-                    return prevHistory.map(item => 
-                        item.id === finalState.id ? finalState : item
-                    );
-                }
-                // Add new entry to history
-                return [finalState, ...prevHistory];
+        // Update analysis state to complete
+        const finalState: AnalysisState = {
+            ...analysisState,
+            status: 'complete',
+            currentStage: getUIText(lang).analysisComplete,
+            currentProgress: 100
+        };
+        
+        setAnalysisState(finalState);
+
+        // Save to server database
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/history`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    result: finalState,
+                    query: finalState.query,
+                    language: finalState.language,
+                }),
             });
-            
-            return finalState;
-        });
+
+            if (!response.ok) {
+                throw new Error('Failed to save report to server');
+            }
+
+            // Refresh history from server to include the new report
+            await refreshHistory();
+        } catch (error) {
+            console.error('Error saving report to server:', error);
+            // Continue even if save fails - user can still see the report
+        }
 
     } catch (e) {
         console.error("Analysis failed:", e);
         const errorMessage = e instanceof Error ? e.message : 'Failed to complete analysis.';
         updateState({ status: 'error', error: errorMessage, currentStage: getUIText(lang).errorTitle });
     }
-  }, []);
+  }, [refreshHistory]);
 
   const resetAnalysis = useCallback(() => {
     setAnalysisState(createInitialState());
@@ -449,24 +479,62 @@ export const useStockAgent = () => {
     }
   }, [history]);
 
-  const deleteFromHistory = useCallback((id: string) => {
-    setHistory(prev => {
-      // Filter out all items with matching id (in case of duplicates)
-      const filtered = prev.filter(item => item.id !== id);
-      // Also clear active state if it matches the deleted item
-      setAnalysisState(current => {
-        if (current.id === id && current.status === 'complete') {
-          return createInitialState();
-        }
-        return current;
+  const deleteFromHistory = useCallback(async (id: string) => {
+    // Delete from server
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/history/${id}`, {
+        method: 'DELETE',
       });
-      return filtered;
+      if (!response.ok && response.status !== 404) {
+        // 404 is okay (item might not exist on server)
+        throw new Error(`Failed to delete report from server: ${response.statusText}`);
+      }
+
+      // Refresh history from server after deletion
+      await refreshHistory();
+    } catch (error) {
+      console.error('Error deleting report from server:', error);
+      // Still update local state to provide immediate feedback
+      setHistory(prev => prev.filter(item => item.id !== id));
+    }
+
+    // Clear active state if it matches the deleted item
+    setAnalysisState(current => {
+      if (current.id === id && current.status === 'complete') {
+        return createInitialState();
+      }
+      return current;
     });
-  }, []);
+  }, [refreshHistory]);
 
-  const clearHistory = useCallback(() => {
-    setHistory([]);
-  }, []);
+  const clearHistory = useCallback(async () => {
+    // Clear from server
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/history`, {
+        method: 'DELETE',
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to clear history from server: ${response.statusText}`);
+      }
 
-  return { analysisState, history, startAnalysis, resetAnalysis, loadFromHistory, deleteFromHistory, clearHistory };
+      // Refresh history from server (should be empty now)
+      await refreshHistory();
+    } catch (error) {
+      console.error('Error clearing history from server:', error);
+      // Still clear local state to provide immediate feedback
+      setHistory([]);
+    }
+  }, [refreshHistory]);
+
+  return { 
+    analysisState, 
+    history, 
+    isLoadingHistory,
+    startAnalysis, 
+    resetAnalysis, 
+    loadFromHistory, 
+    deleteFromHistory, 
+    clearHistory,
+    refreshHistory,
+  };
 };

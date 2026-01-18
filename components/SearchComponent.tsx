@@ -1,4 +1,3 @@
-
 import React, { useState } from 'react';
 import { Language } from '../types.ts';
 import { getUIText } from '../constants.ts';
@@ -6,17 +5,26 @@ import { SearchIcon } from './icons.tsx';
 
 interface SearchComponentProps {
   onSearch: (query: string) => void;
+  // 移除了 onBatchSubmit，因为主页不再处理批量逻辑
   language: Language;
   setLanguage: (lang: Language) => void;
 }
 
-export const SearchComponent: React.FC<SearchComponentProps> = ({ onSearch, language, setLanguage }) => {
+export const SearchComponent: React.FC<SearchComponentProps> = ({ 
+  onSearch, 
+  language, 
+  setLanguage 
+}) => {
   const [query, setQuery] = useState('');
+  // 移除了 isBatchMode 状态
   const uiText = getUIText(language);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    onSearch(query);
+    // 移除了分支判断，直接执行单次搜索
+    if (query.trim()) {
+      onSearch(query);
+    }
   };
 
   const toggleLanguage = () => {
@@ -41,17 +49,20 @@ export const SearchComponent: React.FC<SearchComponentProps> = ({ onSearch, lang
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             className="w-full pl-10 pr-4 py-3 text-lg bg-gray-800 border border-gray-600 rounded-md text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-            placeholder={uiText.searchPlaceholder}
+            placeholder={uiText.searchPlaceholder} // 直接使用原来的占位符
             aria-label="Search query"
           />
         </div>
+        
+        {/* 移除了 Checkbox 区域 */}
+
         <div className="mt-6 flex justify-center items-center gap-4">
           <button
             type="submit"
             disabled={!query.trim()}
             className="px-8 py-3 text-lg font-semibold text-white bg-blue-600 rounded-md hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-gray-900 focus:ring-blue-500 transition-all transform hover:scale-105"
           >
-            {uiText.searchButton}
+            {uiText.searchButton} {/* 直接显示搜索按钮文本 */}
           </button>
           <button
             type="button"
@@ -61,6 +72,8 @@ export const SearchComponent: React.FC<SearchComponentProps> = ({ onSearch, lang
             {uiText.languageToggle}
           </button>
         </div>
+        
+        {/* 移除了底部的提示文字 */}
       </form>
     </div>
   );
