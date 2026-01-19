@@ -6,7 +6,6 @@ import { AnalysisService } from '../services/analysis.js';
 import { updateJobStatus } from './queue.js';
 
 // --- Configuration ---
-// 最大并发任务数：限制同时运行的分析任务数量，防止 API 超限或内存崩溃
 const MAX_CONCURRENT_JOBS = 2; 
 
 // Initialize Vertex AI client (singleton)
@@ -32,10 +31,6 @@ function getAIClient(): GoogleGenAI {
   return aiClient;
 }
 
-/**
- * 核心修复：重置僵尸任务
- * 在服务器启动时调用，防止上次崩溃导致任务卡在 PROCESSING
- */
 export async function resetStalledJobs() {
   try {
     const { count } = await prisma.analysisJob.updateMany({
@@ -57,7 +52,7 @@ async function updateJobProgress(jobId: string, percent: number, message: string
     await updateJobStatus(jobId, {
       progress: percent,
       currentStep: message,
-      logs: [logMessage], // The updateJobStatus implementation should append this
+      logs: [logMessage],
     });
   } catch (error) {
     console.error(`Error updating job progress for ${jobId}:`, error);
@@ -74,7 +69,6 @@ export async function runDeepResearch(
   const ai = getAIClient();
   const analysisService = new AnalysisService(ai);
   
-  // Progress adapter
   const progressCallback = async (progress: number, step: string, log?: string) => {
     const message = log || step;
     if (jobId) await updateJobProgress(jobId, progress, message);
@@ -85,66 +79,62 @@ export async function runDeepResearch(
 }
 
 /**
- * 核心修复：Process Next Job (无锁设计 + 并发控制)
- * 依靠数据库状态来保证并发安全
+ * 核心修复：Process Next Job (事务级并发控制)
  */
 export async function processNextJob(): Promise<void> {
   try {
-    // 1. Check Concurrency Limit (新增逻辑)
-    const activeCount = await prisma.analysisJob.count({
-      where: { status: 'PROCESSING' }
+    // --- 事务开始：原子化检查与锁定 ---
+    const jobToProcess = await prisma.$transaction(async (tx) => {
+      // 1. 在事务内部检查当前运行数量
+      // 这里的 tx 是事务客户端，在这个事务提交前，它看到的状态是一致的
+      const activeCount = await tx.analysisJob.count({
+        where: { status: 'PROCESSING' }
+      });
+
+      if (activeCount >= MAX_CONCURRENT_JOBS) {
+        return null; // 超过限制，直接在事务内放弃
+      }
+
+      // 2. 查找下一个任务
+      const nextJob = await tx.analysisJob.findFirst({
+        where: { status: 'PENDING' },
+        orderBy: { createdAt: 'asc' },
+      });
+
+      if (!nextJob) return null;
+
+      // 3. 立即锁定 (更新状态)
+      // 使用 tx.analysisJob.update 确保在同一个事务里完成更新
+      const lockedJob = await tx.analysisJob.update({
+        where: { id: nextJob.id },
+        data: { 
+          status: 'PROCESSING',
+          startedAt: new Date() 
+        }
+      });
+
+      return lockedJob;
     });
+    // --- 事务结束 ---
 
-    if (activeCount >= MAX_CONCURRENT_JOBS) {
-      // 如果当前正在跑的任务达到上限，暂停领取新任务
-      // console.log(`⚠️ Max concurrency reached (${activeCount}/${MAX_CONCURRENT_JOBS}). Waiting for slots.`);
-      return;
+    // 如果没抢到任务（队列空或满），直接退出
+    if (!jobToProcess) {
+        // console.log('📭 Queue check: No job picked (Queue empty or Max concurrency reached)');
+        return;
     }
 
-    // 2. Debug: Check pending count
-    const pendingCount = await prisma.analysisJob.count({ where: { status: 'PENDING' } });
-    
-    if (pendingCount === 0) {
-      // console.log('📭 Queue empty, stopping worker loop.');
-      return;
-    }
-
-    console.log(`[Debug] Queue check. Pending: ${pendingCount}, Active: ${activeCount}/${MAX_CONCURRENT_JOBS}`);
-
-    // 3. Find First Pending (FIFO)
-    const nextJob = await prisma.analysisJob.findFirst({
-      where: { status: 'PENDING' },
-      orderBy: { createdAt: 'asc' },
-    });
-
-    if (!nextJob) return; // Double check
-
-    // 4. ATOMIC LOCK: Try to update status to PROCESSING
-    // This prevents other workers (if any) from grabbing the same job
-    const jobId = nextJob.id;
-    
-    // Optimistic locking attempt
-    try {
-        await updateJobStatus(jobId, {
-            status: 'PROCESSING',
-            startedAt: new Date(),
-        });
-    } catch (e) {
-        console.log(`[Concurrency] Job ${jobId} might have been picked by another process, skipping.`);
-        // Immediately try again to pick another job if this one failed
-        return processNextJob(); 
-    }
-
-    console.log(`▶️ Processing job ${jobId} (${nextJob.ticker})`);
+    // 拿到任务了，开始执行 (Execution)
+    // 注意：这里的代码已经在事务之外，因为 AI 分析耗时很长，不能卡在数据库事务里
+    const jobId = jobToProcess.id;
+    console.log(`▶️ Processing job ${jobId} (${jobToProcess.ticker})`);
     
     try {
-      // Execute Logic
       await updateJobProgress(jobId, 5, 'Initializing Analysis...');
       
       const result = await runDeepResearch(
-        nextJob.ticker,
-        nextJob.query,
-        nextJob.language,
+        jobToProcess.ticker,
+        jobToProcess.query,
+        jobToProcess.language,
         jobId
       );
 
@@ -171,14 +161,12 @@ export async function processNextJob(): Promise<void> {
         currentStep: 'Failed'
       });
     } finally {
-      // 5. Recursive Loop: Process next job IMMEDIATELY
-      // 当一个任务结束（无论成功失败），释放了一个槽位，立即尝试启动下一个
+      // 递归循环：任务结束后，立即尝试启动下一个
       setTimeout(() => processNextJob(), 100); 
     }
 
   } catch (error) {
     console.error('🔥 Critical Error in processNextJob:', error);
-    // Retry after delay to avoid tight loop on db error
     setTimeout(() => processNextJob(), 5000);
   }
 }
@@ -187,17 +175,12 @@ export async function processNextJob(): Promise<void> {
  * Entry Point
  */
 export function startQueueProcessing(): Promise<void> {
-  // Fire and forget
   console.log('🚀 Triggering Queue Processing Check...');
-  
-  // Start the chain. We don't await this because we want to return the HTTP response immediately.
   setTimeout(() => {
     processNextJob();
   }, 0);
-
   return Promise.resolve();
 }
 
-// 兼容旧接口（如果其他文件还在引用）
 export function isQueueProcessing() { return false; }
 export function setQueueProcessing() {}

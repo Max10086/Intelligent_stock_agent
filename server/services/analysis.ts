@@ -12,6 +12,9 @@ import {
 } from '../../types.js';
 import { searchTicker, getFinancialData } from '../../services/finance.js';
 
+import { getFinancialData } from '../../services/finance.js';
+console.log("Analysis service importing getFinancialData:", getFinancialData);
+
 // This service contains the analysis logic ported from useStockAgent.ts
 // It can be used by both the worker and API routes
 
