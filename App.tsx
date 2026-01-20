@@ -145,7 +145,7 @@ const App: React.FC = () => {
             {analysisState.status === 'idle' && !showBatchStatus ? (
               <SearchComponent
                 onSearch={handleSearch}
-                onBatchSubmit={handleBatchSubmit}
+
                 language={language}
                 setLanguage={setLanguage}
               />

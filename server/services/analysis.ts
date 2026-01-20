@@ -10,10 +10,8 @@ import {
   InvestmentConclusion,
   FinalConclusion,
 } from '../../types.js';
+// FIX: 删除了重复引用，保留这一行正确的
 import { searchTicker, getFinancialData } from '../../services/finance.js';
-
-import { getFinancialData } from '../../services/finance.js';
-console.log("Analysis service importing getFinancialData:", getFinancialData);
 
 // This service contains the analysis logic ported from useStockAgent.ts
 // It can be used by both the worker and API routes
@@ -57,7 +55,9 @@ export class AnalysisService {
       },
     });
 
-    const { competitors } = JSON.parse(response.text);
+    // FIX: 增加空值保底
+    const parsed = JSON.parse(response.text || '{}');
+    const competitors = parsed.competitors || [];
     return competitors.slice(0, 2);
   }
 
@@ -101,8 +101,16 @@ export class AnalysisService {
       },
     });
 
-    const { focusCompany, candidateCompanies } = JSON.parse(response.text);
-    return [focusCompany, ...candidateCompanies.slice(0, 2)];
+    // FIX: 增加空值保底
+    const parsed = JSON.parse(response.text || '{}');
+    const { focusCompany, candidateCompanies } = parsed;
+    
+    // 增加安全性检查，防止 AI 返回空导致崩溃
+    if (!focusCompany) {
+      throw new Error('Failed to identify companies from concept.');
+    }
+    
+    return [focusCompany, ...(candidateCompanies || []).slice(0, 2)];
   }
 
   async generateQuestions(companyName: string, lang: Language): Promise<string[]> {
@@ -124,7 +132,9 @@ export class AnalysisService {
       },
     });
 
-    return JSON.parse(response.text).questions;
+    // FIX: 增加空值保底
+    const parsed = JSON.parse(response.text || '{}');
+    return parsed.questions || [];
   }
 
   async answerQuestion(
@@ -160,7 +170,8 @@ export class AnalysisService {
       await onProgress(`Found ${sources.length} sources, synthesizing answer...`);
     }
 
-    return { question, answer: response.text, sources };
+    // FIX: 增加空值保底
+    return { question, answer: response.text || '', sources };
   }
 
   async synthesizeConclusion(
@@ -198,7 +209,8 @@ export class AnalysisService {
       },
     });
 
-    return JSON.parse(response.text);
+    // FIX: 增加空值保底
+    return JSON.parse(response.text || '{}');
   }
 
   async generateFinalConclusion(
@@ -257,7 +269,8 @@ export class AnalysisService {
       },
     });
 
-    return JSON.parse(response.text);
+    // FIX: 增加空值保底
+    return JSON.parse(response.text || '{}');
   }
 
   async runAnalysisForCompany(

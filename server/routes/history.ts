@@ -103,7 +103,9 @@ router.get('/', async (req, res) => {
           return null;
         }
       })
-      .filter((item): item is AnalysisState => item !== null);
+      // 修改后 (强制断言)
+      // 去掉冒号后面的类型守卫，直接用普通箭头函数
+      .filter((item) => item !== null) as unknown as AnalysisState[];
 
     res.json({
       history,
