@@ -3,21 +3,21 @@
 
     WORKDIR /app
     
-    # 1. 复制依赖文件
+    # 1. 复制依赖定义文件
     COPY package*.json ./
     
-    # 2. 安装所有依赖 (包括 tsx 等 devDependencies，因为我们要用 tsx 运行)
+    # 2. 安装依赖
     RUN npm ci
     
     # 3. 复制所有源代码
     COPY . .
     
-    # 4. 生成 Prisma Client (骗过构建检查)
+    # 4. 生成 Prisma Client (使用假变量骗过构建检查)
     ARG DATABASE_URL
     ENV DATABASE_URL="postgresql://dummy:dummy@localhost:5432/dummy"
     RUN npx prisma generate
     
-    # 5. 注入前端构建变量 (必须在构建阶段存在)
+    # 5. 注入前端构建变量 (Cloud Build 构建时传入)
     ARG NEXT_PUBLIC_SUPABASE_URL
     ARG NEXT_PUBLIC_SUPABASE_ANON_KEY
     ENV NEXT_PUBLIC_SUPABASE_URL=$NEXT_PUBLIC_SUPABASE_URL
@@ -31,33 +31,33 @@
     
     WORKDIR /app
     
-    # 设置生产环境 (注意：有些库在 production 下会表现不同，但 tsx 需要 devDeps)
-    # 为了保险，我们这里暂时不强制设置 NODE_ENV=production，以免 tsx 找不到
+    # 暂时不强制设置 production，确保 tsx 能读取 devDependencies
     # ENV NODE_ENV=production
     
     # 7. 复制构建产物
     
-    # A. 复制 package.json
+    # A. 基础依赖和配置
     COPY --from=builder /app/package.json ./package.json
-    
-    # B. 复制 node_modules (包含 tsx 和 prisma)
     COPY --from=builder /app/node_modules ./node_modules
+    COPY --from=builder /app/tsconfig.json ./tsconfig.json
     
-    # C. 复制 Prisma 文件夹
+    # B. 数据库相关
     COPY --from=builder /app/prisma ./prisma
     
-    # D. 【前端】复制 Vite 构建出的静态文件 (dist)
+    # C. 前端静态文件 (Vite 构建产物)
     COPY --from=builder /app/dist ./dist
     
-    # E. 【后端】复制后端源码 (server) -> 供 tsx 运行
+    # D. 后端源码
     COPY --from=builder /app/server ./server
-    # 如果 server 依赖了根目录下的 lib 文件夹，也需要复制 (根据你的项目结构)
-    COPY --from=builder /app/lib ./lib
-    COPY --from=builder /app/tsconfig.json ./tsconfig.json
+    
+    # E. 【关键】复制类型定义文件
+    # 因为你的 server 代码引用了根目录的 types.ts
+    COPY --from=builder /app/types.ts ./types.ts
     
     # 8. 暴露端口
     ENV PORT=8080
     EXPOSE 8080
     
-    # 9. 启动命令 (运行 package.json 里的 "start": "tsx server/index.ts")
+    # 9. 启动命令
+    # 对应 package.json 中的 "start": "tsx server/index.ts"
     CMD ["npm", "start"]
