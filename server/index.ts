@@ -1,39 +1,54 @@
 import express from 'express';
 import cors from 'cors';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { vertexAIRouter } from './routes/vertex-ai.js';
 import { jobsRouter } from './routes/jobs.js';
 import { historyRouter } from './routes/history.js';
 import { startQueueWorker } from './worker.js';
 
+// --- ESM 路径兼容处理 ---
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 const app = express();
-// Cloud Run 会传入 PORT=8080，必须解析为数字
 const PORT = parseInt(process.env.PORT || '3001', 10);
-// 关键：必须显式绑定到 0.0.0.0，不能是 localhost
 const HOST = '0.0.0.0';
 
 // Middleware
 app.use(cors());
 app.use(express.json());
 
-// Health check endpoint (Cloud Run 用这个来检查服务是否存活)
+// Health check
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok', message: 'Backend server is running' });
 });
 
-// API routes
+// --- 1. API 路由 (保持不变) ---
 app.use('/api/vertex-ai', vertexAIRouter);
 app.use('/api/jobs', jobsRouter);
 app.use('/api/history', historyRouter);
 
+// --- 2. 【关键新增】托管前端静态文件 ---
+// 指向构建好的 dist 目录 (假设 server 和 dist 都在项目根目录下)
+// 在 Docker 中结构是 /app/server 和 /app/dist，所以从 server 目录往上跳一级找 dist
+const distPath = path.join(__dirname, '../dist');
+
+// 静态资源托管 (js, css, images)
+app.use(express.static(distPath));
+
+// --- 3. 【关键新增】SPA 回退路由 (Catch-All) ---
+// 任何不匹配 API 的请求，都返回 index.html，交给 React Router 处理
+app.get('*', (req, res) => {
+  res.sendFile(path.join(distPath, 'index.html'));
+});
+
 // Start server
 const server = app.listen(PORT, HOST, () => {
   console.log(`🚀 Backend server running on http://${HOST}:${PORT}`);
-  console.log(`📡 Vertex AI proxy endpoint: http://${HOST}:${PORT}/api/vertex-ai`);
-  console.log(`📋 Jobs API endpoint: http://${HOST}:${PORT}/api/jobs`);
-  console.log(`📚 History API endpoint: http://${HOST}:${PORT}/api/history`);
+  console.log(`📂 Serving static files from: ${distPath}`);
   
-  // Start the queue worker
-  // 建议：加一个 try-catch，防止 Worker 启动失败导致整个 Server 挂掉
+  // Start queue worker
   try {
     startQueueWorker().catch(err => {
       console.error('❌ Failed to start queue worker asynchronously:', err);
@@ -44,7 +59,7 @@ const server = app.listen(PORT, HOST, () => {
   }
 });
 
-// 优雅关闭处理 (防止 Docker 强制杀进程导致数据丢失)
+// Graceful shutdown
 process.on('SIGTERM', () => {
   console.log('SIGTERM signal received: closing HTTP server');
   server.close(() => {
