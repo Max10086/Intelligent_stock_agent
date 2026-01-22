@@ -53,6 +53,11 @@
     # E. 【关键】复制类型定义文件
     # 因为你的 server 代码引用了根目录的 types.ts
     COPY --from=builder /app/types.ts ./types.ts
+
+
+
+    # 【F. 新增这行！】复制根目录下的 services 文件夹
+    COPY --from=builder /app/services ./services
     
     # 8. 暴露端口
     ENV PORT=8080
