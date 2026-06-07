@@ -66,6 +66,7 @@ export interface FinalConclusion {
 export interface CompanyAnalysis {
   id: string;
   profile: CompanyProfile;
+  quickTake?: string | null;
   status: 'pending' | 'generating_questions' | 'answering_questions' | 'synthesizing' | 'complete' | 'error';
   questions: string[];
   qna: QnAResult[];

@@ -184,7 +184,6 @@ export const useStockAgent = () => {
     Respond ONLY with a valid JSON object containing an array of two companies. The language for the company names should be ${outputLanguage}.`;
 
     const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
         contents: { role: 'user', parts: [{ text: prompt }] },
         config: {
             responseMimeType: 'application/json',
@@ -224,7 +223,6 @@ export const useStockAgent = () => {
       Respond ONLY with a valid JSON object. The language for the company names should be ${outputLanguage}.`;
       
       const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
         contents: { role: 'user', parts: [{ text: prompt }] },
         config: {
           responseMimeType: 'application/json',
@@ -252,7 +250,6 @@ Ensure several questions explicitly require the latest quarter, latest annual re
 Respond ONLY with a valid JSON object: {"questions": ["...", ...]}`;
     
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
       contents: { role: 'user', parts: [{ text: prompt }] },
       config: {
         responseMimeType: 'application/json',
@@ -281,7 +278,6 @@ Answer requirements:
 - Cite sources.`;
     
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
       contents: { role: 'user', parts: [{ text: prompt }] },
       config: {
         tools: [{ googleSearch: {} }],
@@ -313,7 +309,6 @@ When evidence conflicts across years, prioritize the latest period and explain d
 Respond ONLY with a valid JSON object. Q&A: ${JSON.stringify(qna.map(item => ({q: item.question, a: item.answer})))}`;
     
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
       contents: { role: 'user', parts: [{ text: prompt }] },
       config: {
         responseMimeType: 'application/json',
@@ -379,7 +374,6 @@ Respond ONLY with a valid JSON object. Q&A: ${JSON.stringify(qna.map(item => ({q
     Q&A Context: ${JSON.stringify(qna.map(item => ({ question: item.question, answer: item.answer })))}`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
       contents: { role: 'user', parts: [{ text: prompt }] },
       config: {
         responseMimeType: 'application/json',
@@ -388,6 +382,37 @@ Respond ONLY with a valid JSON object. Q&A: ${JSON.stringify(qna.map(item => ({q
     });
 
     return JSON.parse(response.text);
+  };
+
+  const generateCompanyQuickTake = async (
+    company: CompanyProfile,
+    lang: Language
+  ): Promise<string> => {
+    const outputLanguage = lang === 'cn' ? 'Simplified Chinese' : 'English';
+    const prompt = `You are writing a sharp "at-a-glance" company brief in ${outputLanguage}.
+
+Target company:
+- Name: ${company.name}
+- Ticker/Exchange: ${company.ticker} (${company.exchange})
+- Market cap: ${company.marketCap || 'N/A'}
+- Float market cap: ${company.floatMarketCap || 'N/A'}
+
+Reference writing style (must emulate this level of concreteness and directness):
+"Rocket Lab (RKLB) is the second-largest commercial space company in the U.S. after SpaceX, and a key player in high-frequency small-satellite launches. Its core model is an end-to-end space stack: it not only earns launch revenue, but also manufactures satellites and mission-critical components, offering integrated build+launch services to monetize across the full value chain."
+
+Hard requirements:
+1) Output EXACTLY 2 sentences.
+2) Sentence 1: state company identity + relative position/role in its market + scale signal.
+3) Sentence 2: explain the monetization model concretely (how it makes money, key products/services, value-chain position).
+4) Use concrete industry wording; no generic filler.
+5) Forbidden vague phrases (or their equivalents): "core product and service model", "certain differentiation", "comprehensive conclusion", "etc.".
+6) No markdown, no bullet points, no disclaimer.`;
+
+    const response = await ai.models.generateContent({
+      contents: { role: 'user', parts: [{ text: prompt }] },
+    });
+
+    return (response.text || '').replace(/\s+/g, ' ').trim();
   };
 
   const runAnalysisForCompany = async (company: CompanyProfile, lang: Language) => {
@@ -461,9 +486,12 @@ Respond ONLY with a valid JSON object. Q&A: ${JSON.stringify(qna.map(item => ({q
 
         const focusProfile = enrichedProfiles[0];
         const candidateProfiles = enrichedProfiles.slice(1);
+        const companyQuickTakes = await Promise.all(
+          enrichedProfiles.map(profile => generateCompanyQuickTake(profile, lang))
+        );
 
-        const focusAnalysis: CompanyAnalysis = { id: focusProfile.ticker, profile: focusProfile, status: 'pending', questions: [], qna: [], conclusion: null, finalConclusion: null, followUpQuestions: [] };
-        const candidateAnalyses: CompanyAnalysis[] = candidateProfiles.map(p => ({ id: p.ticker, profile: p, status: 'pending', questions: [], qna: [], conclusion: null, finalConclusion: null, followUpQuestions: [] }));
+        const focusAnalysis: CompanyAnalysis = { id: focusProfile.ticker, profile: focusProfile, quickTake: companyQuickTakes[0] || null, status: 'pending', questions: [], qna: [], conclusion: null, finalConclusion: null, followUpQuestions: [] };
+        const candidateAnalyses: CompanyAnalysis[] = candidateProfiles.map((p, idx) => ({ id: p.ticker, profile: p, quickTake: companyQuickTakes[idx + 1] || null, status: 'pending', questions: [], qna: [], conclusion: null, finalConclusion: null, followUpQuestions: [] }));
 
         updateState({
             status: 'analyzing',

@@ -38,13 +38,13 @@ interface GenerateContentResponse {
 class VertexAIClient {
   models = {
     generateContent: async (params: {
-      model: string;
+      model?: string;
       contents: any;
       config?: any;
     }): Promise<GenerateContentResponse> => {
       try {
         const requestBody = JSON.stringify({
-          model: params.model,
+          ...(params.model ? { model: params.model } : {}),
           contents: params.contents,
           config: params.config,
         });

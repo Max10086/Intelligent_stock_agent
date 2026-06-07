@@ -16,7 +16,7 @@ function getAIClient(): GoogleGenAI {
   if (!aiClient) {
     try {
       const projectId = process.env.GOOGLE_CLOUD_PROJECT || 'smartstockagent';
-      const location = process.env.GOOGLE_CLOUD_LOCATION || 'us-central1';
+      const location = process.env.GOOGLE_CLOUD_LOCATION || 'global';
       
       aiClient = new GoogleGenAI({
         vertexai: true,

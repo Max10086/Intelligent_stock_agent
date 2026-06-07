@@ -210,7 +210,7 @@ const ConclusionSection: React.FC<{ title: string; data: { summary: string; evid
 
 export const CompanyReport: React.FC<CompanyReportProps> = ({ companyAnalysis, language }) => {
   const uiText = getUIText(language);
-  const { profile, status, qna, conclusion, finalConclusion } = companyAnalysis;
+  const { profile, quickTake, status, qna, conclusion, finalConclusion } = companyAnalysis;
   const freshnessAudit = buildFreshnessAudit(qna);
   const yesLabel = language === 'cn' ? '是' : 'Yes';
   const noLabel = language === 'cn' ? '否' : 'No';
@@ -255,6 +255,57 @@ export const CompanyReport: React.FC<CompanyReportProps> = ({ companyAnalysis, l
     return parsed.toFixed(2);
   };
 
+  const formatMarketCap = (value?: string, currency?: string) => {
+    if (!value) return 'N/A';
+    const parsed = parseFloat(value.replace(/,/g, ''));
+    if (isNaN(parsed) || parsed <= 0) return 'N/A';
+
+    // Tencent quote market cap fields are typically reported in "hundred millions" (e.g. 633 -> 63.3B).
+    // Convert to absolute currency amount before human-readable formatting.
+    const normalizedAmount = parsed < 1_000_000 ? parsed * 100_000_000 : parsed;
+
+    let display = '';
+    if (normalizedAmount >= 1_000_000_000_000) {
+      display = `${(normalizedAmount / 1_000_000_000_000).toFixed(2)}T`;
+    } else if (normalizedAmount >= 1_000_000_000) {
+      display = `${(normalizedAmount / 1_000_000_000).toFixed(2)}B`;
+    } else if (normalizedAmount >= 1_000_000) {
+      display = `${(normalizedAmount / 1_000_000).toFixed(2)}M`;
+    } else {
+      display = normalizedAmount.toLocaleString('en-US', { maximumFractionDigits: 0 });
+    }
+
+    if (currency && /^[A-Z]{3}$/.test(currency)) {
+      return `${display} ${currency}`;
+    }
+    return display;
+  };
+
+  const getDisplayMarketCaps = () => {
+    const totalRaw = parseFloat((profile.marketCap || '').replace(/,/g, ''));
+    const floatRaw = parseFloat((profile.floatMarketCap || '').replace(/,/g, ''));
+
+    const totalValid = Number.isFinite(totalRaw) && totalRaw > 0;
+    const floatValid = Number.isFinite(floatRaw) && floatRaw > 0;
+
+    // Safety normalization:
+    // if both exist but are reversed in historical payloads, ensure total >= float.
+    if (totalValid && floatValid && floatRaw > totalRaw) {
+      return {
+        total: profile.floatMarketCap,
+        float: profile.marketCap,
+      };
+    }
+
+    return {
+      total: profile.marketCap,
+      float: profile.floatMarketCap,
+    };
+  };
+
+  const displayCaps = getDisplayMarketCaps();
+  const displayQuickTake = (quickTake || '').trim();
+
   return (
     <div className="space-y-8 fade-in">
       <section className="bg-gray-800 p-6 rounded-lg shadow-lg">
@@ -263,25 +314,38 @@ export const CompanyReport: React.FC<CompanyReportProps> = ({ companyAnalysis, l
           <div className="md:col-span-1">
               <p className="text-gray-400">{profile.name}</p>
               <p className="text-lg font-semibold text-white">{profile.ticker} ({profile.exchange})</p>
+              {displayQuickTake && (
+                <p className="mt-4 text-sm leading-6 text-gray-300">
+                  {displayQuickTake}
+                </p>
+              )}
           </div>
-          <div className="md:col-span-2 grid grid-cols-4 gap-6">
-              <div>
+          <div className="md:col-span-2 grid grid-cols-2 lg:grid-cols-3 gap-3">
+              <div className="rounded-md bg-gray-900/40 p-3 min-h-[84px] flex flex-col justify-between">
                   <p className="text-gray-400 flex items-center gap-1"><CurrencyDollarIcon className="w-4 h-4"/> {uiText.currentPrice}</p>
                   <p className="text-lg font-semibold text-white">{formatPrice(profile.currentPrice)}</p>
               </div>
-              <div>
+              <div className="rounded-md bg-gray-900/40 p-3 min-h-[84px] flex flex-col justify-between">
                   <p className="text-gray-400">{uiText.dayChangePct}</p>
                   <p className={`text-lg font-semibold ${getChangeColor(profile.dayChangePct)}`}>{profile.dayChangePct || 'N/A'}</p>
               </div>
-              <div>
+              <div className="rounded-md bg-gray-900/40 p-3 min-h-[84px] flex flex-col justify-between">
                   <p className="text-gray-400">{uiText.high52w}/{uiText.low52w}</p>
                   <p className="text-lg font-semibold text-white">
                     {formatPrice(profile.high52w || '')} / {formatPrice(profile.low52w || '')}
                   </p>
               </div>
-              <div>
+              <div className="rounded-md bg-gray-900/40 p-3 min-h-[84px] flex flex-col justify-between">
                   <p className="text-gray-400">{uiText.peTtm}</p>
                   <p className="text-lg font-semibold text-white">{formatPe(profile.peTtm)}</p>
+              </div>
+              <div className="rounded-md bg-gray-900/40 p-3 min-h-[84px] flex flex-col justify-between">
+                  <p className="text-gray-400">{uiText.marketCap}</p>
+                  <p className="text-lg font-semibold text-white">{formatMarketCap(displayCaps.total, profile.currency)}</p>
+              </div>
+              <div className="rounded-md bg-gray-900/40 p-3 min-h-[84px] flex flex-col justify-between">
+                  <p className="text-gray-400">{uiText.floatMarketCap}</p>
+                  <p className="text-lg font-semibold text-white">{formatMarketCap(displayCaps.float, profile.currency)}</p>
               </div>
           </div>
         </div>

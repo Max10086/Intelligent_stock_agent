@@ -6,6 +6,7 @@ import { vertexAIRouter } from './routes/vertex-ai.js';
 import { jobsRouter } from './routes/jobs.js';
 import { historyRouter } from './routes/history.js';
 import { startQueueWorker } from './worker.js';
+import { ANALYSIS_MODEL } from './aiModelConfig.js';
 
 // --- ESM 路径兼容处理 ---
 const __filename = fileURLToPath(import.meta.url);
@@ -23,6 +24,11 @@ app.use(express.json({ limit: '10mb' }));
 // Health check
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok', message: 'Backend server is running' });
+});
+
+// Runtime model info (for frontend visibility/debugging)
+app.get('/api/model', (req, res) => {
+  res.status(200).json({ model: ANALYSIS_MODEL });
 });
 
 // --- 1. API 路由 (保持不变) ---

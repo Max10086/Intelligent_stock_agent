@@ -10,6 +10,7 @@ import {
   InvestmentConclusion,
   FinalConclusion,
 } from '../../types.js';
+import { ANALYSIS_MODEL } from '../aiModelConfig.js';
 // FIX: 删除了重复引用，保留这一行正确的
 import { searchTicker, getFinancialData } from '../../services/finance.js';
 
@@ -70,7 +71,7 @@ export class AnalysisService {
     Respond ONLY with a valid JSON object containing an array of two companies. The language for the company names should be ${outputLanguage}.`;
 
     const response = await this.ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: ANALYSIS_MODEL,
       contents: { role: 'user', parts: [{ text: prompt }] },
       config: {
         responseMimeType: 'application/json',
@@ -115,7 +116,7 @@ export class AnalysisService {
     Respond ONLY with a valid JSON object. The language for the company names should be ${outputLanguage}.`;
 
     const response = await this.ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: ANALYSIS_MODEL,
       contents: { role: 'user', parts: [{ text: prompt }] },
       config: {
         responseMimeType: 'application/json',
@@ -151,7 +152,7 @@ Ensure several questions explicitly require the latest quarter, latest annual re
 Respond ONLY with a valid JSON object: {"questions": ["...", ...]}`;
 
     const response = await this.ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: ANALYSIS_MODEL,
       contents: { role: 'user', parts: [{ text: prompt }] },
       config: {
         responseMimeType: 'application/json',
@@ -193,7 +194,7 @@ Answer requirements:
 - Cite sources.`;
 
     const response = await this.ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: ANALYSIS_MODEL,
       contents: { role: 'user', parts: [{ text: prompt }] },
       config: {
         tools: [{ googleSearch: {} }],
@@ -236,7 +237,7 @@ When evidence conflicts across years, prioritize the latest period and explain d
 Respond ONLY with a valid JSON object. Q&A: ${JSON.stringify(qna.map(item => ({ q: item.question, a: item.answer })))}`;
 
     const response = await this.ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: ANALYSIS_MODEL,
       contents: { role: 'user', parts: [{ text: prompt }] },
       config: {
         responseMimeType: 'application/json',
@@ -307,7 +308,7 @@ Respond ONLY with a valid JSON object. Q&A: ${JSON.stringify(qna.map(item => ({ 
     Q&A Context: ${JSON.stringify(qna.map(item => ({ question: item.question, answer: item.answer })))}`;
 
     const response = await this.ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: ANALYSIS_MODEL,
       contents: { role: 'user', parts: [{ text: prompt }] },
       config: {
         responseMimeType: 'application/json',
@@ -317,6 +318,38 @@ Respond ONLY with a valid JSON object. Q&A: ${JSON.stringify(qna.map(item => ({ 
 
     // FIX: 增加空值保底
     return JSON.parse(response.text || '{}');
+  }
+
+  async generateCompanyQuickTake(
+    company: CompanyProfile,
+    lang: Language
+  ): Promise<string> {
+    const outputLanguage = lang === 'cn' ? 'Simplified Chinese' : 'English';
+    const prompt = `You are writing a sharp "at-a-glance" company brief in ${outputLanguage}.
+
+Target company:
+- Name: ${company.name}
+- Ticker/Exchange: ${company.ticker} (${company.exchange})
+- Market cap: ${company.marketCap || 'N/A'}
+- Float market cap: ${company.floatMarketCap || 'N/A'}
+
+Reference writing style (must emulate this level of concreteness and directness):
+"Rocket Lab (RKLB) is the second-largest commercial space company in the U.S. after SpaceX, and a key player in high-frequency small-satellite launches. Its core model is an end-to-end space stack: it not only earns launch revenue, but also manufactures satellites and mission-critical components, offering integrated build+launch services to monetize across the full value chain."
+
+Hard requirements:
+1) Output EXACTLY 2 sentences.
+2) Sentence 1: state company identity + relative position/role in its market + scale signal.
+3) Sentence 2: explain the monetization model concretely (how it makes money, key products/services, value-chain position).
+4) Use concrete industry wording; no generic filler.
+5) Forbidden vague phrases (or their equivalents): "core product and service model", "certain differentiation", "comprehensive conclusion", "etc.".
+6) No markdown, no bullet points, no disclaimer.`;
+
+    const response = await this.ai.models.generateContent({
+      model: ANALYSIS_MODEL,
+      contents: { role: 'user', parts: [{ text: prompt }] },
+    });
+
+    return (response.text || '').replace(/\s+/g, ' ').trim();
   }
 
   async runAnalysisForCompany(
@@ -421,6 +454,10 @@ Respond ONLY with a valid JSON object. Q&A: ${JSON.stringify(qna.map(item => ({ 
 
     const focusProfile = enrichedProfiles[0];
     const candidateProfiles = enrichedProfiles.slice(1);
+    await log(52, 'Generating Company Snapshots', 'Creating quick company overviews');
+    const quickTakes = await Promise.all(
+      enrichedProfiles.map(async (profile) => this.generateCompanyQuickTake(profile, lang))
+    );
 
     // Analyze focus company
     await log(55, 'Analyzing Focus Company', `${focusProfile.name} (${focusProfile.ticker})`);
@@ -437,6 +474,7 @@ Respond ONLY with a valid JSON object. Q&A: ${JSON.stringify(qna.map(item => ({ 
     const focusCompanyAnalysis: CompanyAnalysis = {
       id: focusProfile.ticker,
       profile: focusProfile,
+      quickTake: quickTakes[0] || null,
       status: 'complete',
       questions: focusAnalysis.questions,
       qna: focusAnalysis.qna,
@@ -464,6 +502,7 @@ Respond ONLY with a valid JSON object. Q&A: ${JSON.stringify(qna.map(item => ({ 
       candidateAnalyses.push({
         id: profile.ticker,
         profile,
+        quickTake: quickTakes[i + 1] || null,
         status: 'complete',
         questions: analysis.questions,
         qna: analysis.qna,

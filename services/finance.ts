@@ -1,5 +1,37 @@
 import type { CompanyProfile } from '../types.ts';
 
+const decodeTencentQuoteText = async (res: Response): Promise<string> => {
+    const buffer = await res.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
+    const encodings = ['gb18030', 'gbk', 'utf-8'];
+
+    for (const encoding of encodings) {
+        try {
+            return new TextDecoder(encoding as any).decode(bytes);
+        } catch {
+            // Try next encoding.
+        }
+    }
+
+    // Final fallback: utf-8 decode
+    return new TextDecoder('utf-8').decode(bytes);
+};
+
+const hasBrokenName = (name: string): boolean => {
+    if (!name) return true;
+    if (name.includes('�')) return true;
+    if (/[\u0000-\u001f]/.test(name)) return true;
+    return false;
+};
+
+const normalizeDisplayName = (rawName: string | undefined, fallbackTicker: string): string => {
+    const cleaned = (rawName || '').replace(/\s+/g, ' ').trim();
+    if (hasBrokenName(cleaned)) {
+        return fallbackTicker;
+    }
+    return cleaned;
+};
+
 // Helper to format ticker for Tencent API
 const formatTickerForTencent = (ticker: string, exchange: string): string => {
     // ... (保持不变) ...
@@ -95,7 +127,7 @@ const validateTickerViaTencent = async (ticker: string, exchange: string): Promi
     const formatted = formatTickerForTencent(ticker, exchange);
     try {
         const res = await fetchWithRetry(`https://qt.gtimg.cn/q=${formatted}`);
-        const text = await res.text();
+        const text = await decodeTencentQuoteText(res);
         return text.includes('~') && !text.includes('v_pv_none_match=1');
     } catch {
         return false;
@@ -352,12 +384,12 @@ export const searchTicker = async (query: string): Promise<Pick<CompanyProfile, 
                 const res = await fetchWithRetry(`https://qt.gtimg.cn/q=${formattedTicker}`);
                 if (!res.ok) continue;
 
-                const text = await res.text();
+                const text = await decodeTencentQuoteText(res);
                 if (text.includes('~') && !text.includes('v_pv_none_match=1')) {
                     const dataStr = text.substring(text.indexOf('"') + 1, text.lastIndexOf('"'));
                     const parts = dataStr.split('~');
                     if (parts.length > 2 && parts[1]) {
-                        const name = parts[1];
+                        const name = normalizeDisplayName(parts[1], upperQuery);
                         const tickerWithExchange = parts[2];
                         const ticker = upperQuery;
                         const exchange = tencentExchangeToAppExchange(tickerWithExchange, prefix);
@@ -391,7 +423,7 @@ export const getFinancialData = async (
             throw new Error(`Failed to fetch financial data for ${basicProfile.ticker}`);
         }
 
-        const quoteText = await quoteRes.text();
+        const quoteText = await decodeTencentQuoteText(quoteRes);
         const quoteData = quoteText.substring(quoteText.indexOf('"') + 1, quoteText.lastIndexOf('"'));
         const parts = quoteData.split('~');
 
@@ -414,8 +446,10 @@ export const getFinancialData = async (
         const peTtm = peRaw !== null ? peRaw.toFixed(2) : '';
         const pbRaw = parseFinite(parts[46] || '');
         const pb = pbRaw !== null ? pbRaw.toFixed(2) : '';
-        const marketCap = parts[44] || '';
-        const floatMarketCap = parts[45] || '';
+        // Tencent quote payload uses [45] for total market cap and [44] for float market cap
+        // (verified with US symbols like PL/PLTR where [45] matches broker-reported total cap).
+        const marketCap = parts[45] || '';
+        const floatMarketCap = parts[44] || '';
         const { high52w, low52w } = get52WeekBounds(parts, basicProfile.exchange);
         const currency = parseCurrencyField(parts[35] || '');
 

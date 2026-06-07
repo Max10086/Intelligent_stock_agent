@@ -1,5 +1,5 @@
 
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { SearchComponent } from './components/SearchComponent.tsx';
 import { AnalysisComponent } from './components/AnalysisComponent.tsx';
 import { BatchQueuePage } from './components/BatchQueuePage.tsx';
@@ -15,6 +15,7 @@ const App: React.FC = () => {
   const [language, setLanguage] = useState<Language>('en');
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [currentView, setCurrentView] = useState<ViewMode>('single');
+  const [activeModel, setActiveModel] = useState<string | null>(null);
   const {
     analysisState,
     history,
@@ -29,6 +30,23 @@ const App: React.FC = () => {
     dismissSaveNotice,
   } = useStockAgent();
   const { activeBatchJobId, batchJobStatus, isPolling, submitBatchJob, clearBatchJob } = useBatchJobs();
+
+  useEffect(() => {
+    const fetchActiveModel = async () => {
+      try {
+        const response = await fetch('/api/model');
+        if (!response.ok) return;
+        const data = await response.json();
+        if (typeof data.model === 'string' && data.model.trim()) {
+          setActiveModel(data.model.trim());
+        }
+      } catch {
+        // Keep UI quiet if backend model endpoint is temporarily unavailable.
+      }
+    };
+
+    fetchActiveModel();
+  }, []);
 
   const handleSearch = useCallback((query: string) => {
     if (query.trim()) {
@@ -185,6 +203,11 @@ const App: React.FC = () => {
         )}
       </main>
       <footer className="text-center py-4 text-gray-500 text-sm">
+        {activeModel && (
+          <p className="mb-1 text-xs text-gray-400">
+            {language === 'cn' ? '当前模型' : 'Active Model'}: <span className="font-semibold text-gray-300">{activeModel}</span>
+          </p>
+        )}
         <p>Intelligent Stock Agent. For informational purposes only. Not financial advice.</p>
       </footer>
     </div>
