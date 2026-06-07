@@ -1,5 +1,5 @@
 
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { ai } from '../services/gemini.ts';
 import { getFinancialData, searchTicker } from '../services/finance.ts';
 import { Type } from '@google/genai';
@@ -26,6 +26,35 @@ const createInitialState = (): AnalysisState => ({
 
 const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
 
+const getLatestDisclosedQuarter = (date: Date): { year: number; quarter: number } => {
+  const year = date.getFullYear();
+  const month = date.getMonth() + 1;
+  // Conservative disclosure assumptions:
+  // Q1 by May, Q2 by Aug, Q3 by Nov, Q4/annual by next spring.
+  if (month <= 4) return { year: year - 1, quarter: 3 };
+  if (month <= 7) return { year, quarter: 1 };
+  if (month <= 10) return { year, quarter: 2 };
+  return { year, quarter: 3 };
+};
+
+const buildRecencyGuidance = (date: Date) => {
+  const today = date.toISOString().slice(0, 10);
+  const { year: quarterYear, quarter } = getLatestDisclosedQuarter(date);
+  const latestAnnualYear = date.getFullYear() - 1;
+  const compareYear1 = latestAnnualYear - 1;
+  const compareYear2 = latestAnnualYear - 2;
+
+  return `Today is ${today}.
+Prioritize the most recent information in this strict order:
+1) The latest 2-3 months of updates (news, announcements, policy changes, major events)
+2) ${quarterYear} Q${quarter} data and filings (latest disclosed quarter)
+3) ${latestAnnualYear} annual report / FY${latestAnnualYear} official disclosures (latest complete annual report)
+4) ${compareYear1} and ${compareYear2} only for historical comparison and trend context
+When newer authoritative data exists, do NOT anchor conclusions on older numbers.
+If newer data cannot be found, explicitly state the latest available date and why older data is used.
+Always include concrete dates or periods (YYYY-MM or YYYY-Qx) in key claims.`;
+};
+
 export const useStockAgent = () => {
   const [analysisState, setAnalysisState] = useState<AnalysisState>(() => {
     const initialState = createInitialState();
@@ -51,6 +80,9 @@ export const useStockAgent = () => {
 
   const [history, setHistory] = useState<AnalysisState[]>([]);
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'success' | 'error'>('idle');
+  const [saveMessage, setSaveMessage] = useState('');
+  const analysisStateRef = useRef<AnalysisState>(analysisState);
 
   // Fetch history from server on mount (100% server-based)
   useEffect(() => {
@@ -83,6 +115,10 @@ export const useStockAgent = () => {
 
     fetchServerHistory();
   }, []); // Only run on mount
+
+  useEffect(() => {
+    analysisStateRef.current = analysisState;
+  }, [analysisState]);
 
   useEffect(() => {
     try {
@@ -209,7 +245,11 @@ export const useStockAgent = () => {
 
   const generateQuestions = async (companyName: string, lang: Language): Promise<string[]> => {
     const outputLanguage = lang === 'cn' ? 'Simplified Chinese' : 'English';
-    const prompt = `Generate exactly 10 critical investment research questions in ${outputLanguage} about "${companyName}". Cover: supply chain, market position, business model, financials, growth drivers, competitive advantages, risks, management, recent news, and valuation. Respond ONLY with a valid JSON object: {"questions": ["...", ...]}`;
+    const now = new Date();
+    const prompt = `Generate exactly 10 critical investment research questions in ${outputLanguage} about "${companyName}". Cover: supply chain, market position, business model, financials, growth drivers, competitive advantages, risks, management, recent news, and valuation.
+${buildRecencyGuidance(now)}
+Ensure several questions explicitly require the latest quarter, latest annual report, and very recent 2-3 month developments.
+Respond ONLY with a valid JSON object: {"questions": ["...", ...]}`;
     
     const response = await ai.models.generateContent({
       model: 'gemini-2.5-flash',
@@ -231,7 +271,14 @@ export const useStockAgent = () => {
 
   const answerQuestion = async (question: string, companyName: string, lang: Language): Promise<QnAResult> => {
     const outputLanguage = lang === 'cn' ? 'Simplified Chinese' : 'English';
-    const prompt = `As a financial analyst, answer this question about "${companyName}" in ${outputLanguage}: "${question}". Provide a detailed, data-driven answer using the most recent information. Cite sources.`;
+    const now = new Date();
+    const prompt = `As a financial analyst, answer this question about "${companyName}" in ${outputLanguage}: "${question}".
+${buildRecencyGuidance(now)}
+Answer requirements:
+- Use freshest available data first; older data is secondary context only.
+- If the latest filing/period is unavailable, clearly disclose that limitation.
+- For key facts, include period labels (e.g. YYYY-Qx, YYYY annual report, YYYY-MM).
+- Cite sources.`;
     
     const response = await ai.models.generateContent({
       model: 'gemini-2.5-flash',
@@ -259,7 +306,11 @@ export const useStockAgent = () => {
         required: ['summary', 'evidence']
     };
 
-    const prompt = `Based on this Q&A for "${companyName}", synthesize an investment thesis in ${outputLanguage}. Structure the response into: "UpstreamSupplyChain", "MarketPosition", "BusinessModel", "Financials", "OutlookRisks". For each, provide a summary and list key evidence from the Q&A. Respond ONLY with a valid JSON object. Q&A: ${JSON.stringify(qna.map(item => ({q: item.question, a: item.answer})))}`;
+    const now = new Date();
+    const prompt = `Based on this Q&A for "${companyName}", synthesize an investment thesis in ${outputLanguage}. Structure the response into: "UpstreamSupplyChain", "MarketPosition", "BusinessModel", "Financials", "OutlookRisks". For each, provide a summary and list key evidence from the Q&A.
+${buildRecencyGuidance(now)}
+When evidence conflicts across years, prioritize the latest period and explain differences briefly.
+Respond ONLY with a valid JSON object. Q&A: ${JSON.stringify(qna.map(item => ({q: item.question, a: item.answer})))}`;
     
     const response = await ai.models.generateContent({
       model: 'gemini-2.5-flash',
@@ -314,12 +365,14 @@ export const useStockAgent = () => {
         required: ['overall_conclusion', 'bullet_points']
     };
 
+    const now = new Date();
     const prompt = `You are a senior investment analyst. Based on the following comprehensive Q&A for "${companyName}", provide a final, decisive investment conclusion in ${outputLanguage}. 
     
     Your task is to:
     1.  Formulate a clear, one-sentence overall conclusion (e.g., 'Strong Buy', 'Hold', 'Speculative Buy', 'Sell').
     2.  Provide 3-5 bullet points that summarize the most critical arguments supporting your conclusion.
     3.  For each argument, cite specific, quantitative evidence directly from the provided Q&A.
+    ${buildRecencyGuidance(now)}
     
     Respond ONLY with a valid JSON object matching the required schema.
     
@@ -378,6 +431,8 @@ export const useStockAgent = () => {
 
   const startAnalysis = useCallback(async (query: string, lang: Language) => {
     const id = Date.now().toString();
+    setSaveStatus('idle');
+    setSaveMessage('');
     setAnalysisState({ ...createInitialState(), id, timestamp: new Date().toISOString(), status: 'finding_companies', query, language: lang, currentStage: getUIText(lang).findingCompanies, currentProgress: 5 });
     
     try {
@@ -426,39 +481,44 @@ export const useStockAgent = () => {
             await delay(2000);
         }
 
-        // Update analysis state to complete
-        const finalState: AnalysisState = {
-            ...analysisState,
-            status: 'complete',
-            currentStage: getUIText(lang).analysisComplete,
-            currentProgress: 100
+        const completedState: AnalysisState = {
+          ...analysisStateRef.current,
+          status: 'complete',
+          currentStage: getUIText(lang).analysisComplete,
+          currentProgress: 100,
         };
-        
-        setAnalysisState(finalState);
+        analysisStateRef.current = completedState;
+        setAnalysisState(completedState);
 
-        // Save to server database
+        // Save to server database immediately after reaching 100%
+        setSaveStatus('saving');
+        setSaveMessage(getUIText(lang).savingReport);
         try {
-            const response = await fetch(`${API_BASE_URL}/api/history`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    result: finalState,
-                    query: finalState.query,
-                    language: finalState.language,
-                }),
-            });
+          const response = await fetch(`${API_BASE_URL}/api/history`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              result: completedState,
+              query: completedState.query,
+              language: completedState.language,
+            }),
+          });
 
-            if (!response.ok) {
-                throw new Error('Failed to save report to server');
-            }
+          if (!response.ok) {
+            const errorData = await response.json().catch(() => ({}));
+            throw new Error(errorData.error || `Failed to save report (${response.status})`);
+          }
 
-            // Refresh history from server to include the new report
-            await refreshHistory();
+          await refreshHistory();
+          setSaveStatus('success');
+          setSaveMessage(getUIText(lang).saveSuccess);
         } catch (error) {
-            console.error('Error saving report to server:', error);
-            // Continue even if save fails - user can still see the report
+          console.error('Error saving report to server:', error);
+          const message = error instanceof Error ? error.message : 'Failed to save report';
+          setSaveStatus('error');
+          setSaveMessage(`${getUIText(lang).saveFailed}: ${message}`);
         }
 
     } catch (e) {
@@ -526,15 +586,23 @@ export const useStockAgent = () => {
     }
   }, [refreshHistory]);
 
+  const dismissSaveNotice = useCallback(() => {
+    setSaveStatus('idle');
+    setSaveMessage('');
+  }, []);
+
   return { 
     analysisState, 
     history, 
     isLoadingHistory,
+    saveStatus,
+    saveMessage,
     startAnalysis, 
     resetAnalysis, 
     loadFromHistory, 
     deleteFromHistory, 
     clearHistory,
     refreshHistory,
+    dismissSaveNotice,
   };
 };

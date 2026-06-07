@@ -6,7 +6,8 @@ import { AnalysisService } from '../services/analysis.js';
 import { updateJobStatus } from './queue.js';
 
 // --- Configuration ---
-const MAX_CONCURRENT_JOBS = 2; 
+const MAX_CONCURRENT_JOBS = 2;
+let consecutiveErrors = 0;
 
 // Initialize Vertex AI client (singleton)
 let aiClient: GoogleGenAI | null = null;
@@ -79,48 +80,44 @@ export async function runDeepResearch(
 }
 
 /**
- * 核心修复：Process Next Job (事务级并发控制)
+ * Claim next job without $transaction (Supabase pooler port 6543 rejects interactive transactions).
  */
+async function claimNextJob() {
+  const activeCount = await prisma.analysisJob.count({
+    where: { status: 'PROCESSING' },
+  });
+
+  if (activeCount >= MAX_CONCURRENT_JOBS) {
+    return null;
+  }
+
+  const nextJob = await prisma.analysisJob.findFirst({
+    where: { status: 'PENDING' },
+    orderBy: { createdAt: 'asc' },
+  });
+
+  if (!nextJob) {
+    return null;
+  }
+
+  const claimed = await prisma.analysisJob.updateMany({
+    where: { id: nextJob.id, status: 'PENDING' },
+    data: {
+      status: 'PROCESSING',
+      startedAt: new Date(),
+    },
+  });
+
+  return claimed.count > 0 ? nextJob : null;
+}
+
 export async function processNextJob(): Promise<void> {
   try {
-    // --- 事务开始：原子化检查与锁定 ---
-    const jobToProcess = await prisma.$transaction(async (tx) => {
-      // 1. 在事务内部检查当前运行数量
-      // 这里的 tx 是事务客户端，在这个事务提交前，它看到的状态是一致的
-      const activeCount = await tx.analysisJob.count({
-        where: { status: 'PROCESSING' }
-      });
+    const jobToProcess = await claimNextJob();
 
-      if (activeCount >= MAX_CONCURRENT_JOBS) {
-        return null; // 超过限制，直接在事务内放弃
-      }
-
-      // 2. 查找下一个任务
-      const nextJob = await tx.analysisJob.findFirst({
-        where: { status: 'PENDING' },
-        orderBy: { createdAt: 'asc' },
-      });
-
-      if (!nextJob) return null;
-
-      // 3. 立即锁定 (更新状态)
-      // 使用 tx.analysisJob.update 确保在同一个事务里完成更新
-      const lockedJob = await tx.analysisJob.update({
-        where: { id: nextJob.id },
-        data: { 
-          status: 'PROCESSING',
-          startedAt: new Date() 
-        }
-      });
-
-      return lockedJob;
-    });
-    // --- 事务结束 ---
-
-    // 如果没抢到任务（队列空或满），直接退出
     if (!jobToProcess) {
-        // console.log('📭 Queue check: No job picked (Queue empty or Max concurrency reached)');
-        return;
+      consecutiveErrors = 0;
+      return;
     }
 
     // 拿到任务了，开始执行 (Execution)
@@ -166,8 +163,12 @@ export async function processNextJob(): Promise<void> {
     }
 
   } catch (error) {
-    console.error('🔥 Critical Error in processNextJob:', error);
-    setTimeout(() => processNextJob(), 5000);
+    consecutiveErrors += 1;
+    const retryMs = Math.min(60000, 5000 * consecutiveErrors);
+    if (consecutiveErrors <= 3 || consecutiveErrors % 10 === 0) {
+      console.error('🔥 Error in processNextJob (will retry):', error);
+    }
+    setTimeout(() => processNextJob(), retryMs);
   }
 }
 
@@ -175,7 +176,6 @@ export async function processNextJob(): Promise<void> {
  * Entry Point
  */
 export function startQueueProcessing(): Promise<void> {
-  console.log('🚀 Triggering Queue Processing Check...');
   setTimeout(() => {
     processNextJob();
   }, 0);

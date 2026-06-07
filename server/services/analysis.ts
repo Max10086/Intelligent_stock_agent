@@ -18,6 +18,35 @@ import { searchTicker, getFinancialData } from '../../services/finance.js';
 
 export type ProgressCallback = (progress: number, step: string, log?: string) => void | Promise<void>;
 
+const getLatestDisclosedQuarter = (date: Date): { year: number; quarter: number } => {
+  const year = date.getFullYear();
+  const month = date.getMonth() + 1;
+  // Conservative disclosure assumptions:
+  // Q1 by May, Q2 by Aug, Q3 by Nov, Q4/annual by next spring.
+  if (month <= 4) return { year: year - 1, quarter: 3 };
+  if (month <= 7) return { year, quarter: 1 };
+  if (month <= 10) return { year, quarter: 2 };
+  return { year, quarter: 3 };
+};
+
+const buildRecencyGuidance = (date: Date) => {
+  const today = date.toISOString().slice(0, 10);
+  const { year: quarterYear, quarter } = getLatestDisclosedQuarter(date);
+  const latestAnnualYear = date.getFullYear() - 1;
+  const compareYear1 = latestAnnualYear - 1;
+  const compareYear2 = latestAnnualYear - 2;
+
+  return `Today is ${today}.
+Prioritize the most recent information in this strict order:
+1) The latest 2-3 months of updates (news, announcements, policy changes, major events)
+2) ${quarterYear} Q${quarter} data and filings (latest disclosed quarter)
+3) ${latestAnnualYear} annual report / FY${latestAnnualYear} official disclosures (latest complete annual report)
+4) ${compareYear1} and ${compareYear2} only for historical comparison and trend context
+When newer authoritative data exists, do NOT anchor conclusions on older numbers.
+If newer data cannot be found, explicitly state the latest available date and why older data is used.
+Always include concrete dates or periods (YYYY-MM or YYYY-Qx) in key claims.`;
+};
+
 export class AnalysisService {
   constructor(private ai: GoogleGenAI) {}
 
@@ -115,7 +144,11 @@ export class AnalysisService {
 
   async generateQuestions(companyName: string, lang: Language): Promise<string[]> {
     const outputLanguage = lang === 'cn' ? 'Simplified Chinese' : 'English';
-    const prompt = `Generate exactly 10 critical investment research questions in ${outputLanguage} about "${companyName}". Cover: supply chain, market position, business model, financials, growth drivers, competitive advantages, risks, management, recent news, and valuation. Respond ONLY with a valid JSON object: {"questions": ["...", ...]}`;
+    const now = new Date();
+    const prompt = `Generate exactly 10 critical investment research questions in ${outputLanguage} about "${companyName}". Cover: supply chain, market position, business model, financials, growth drivers, competitive advantages, risks, management, recent news, and valuation.
+${buildRecencyGuidance(now)}
+Ensure several questions explicitly require the latest quarter, latest annual report, and very recent 2-3 month developments.
+Respond ONLY with a valid JSON object: {"questions": ["...", ...]}`;
 
     const response = await this.ai.models.generateContent({
       model: 'gemini-2.5-flash',
@@ -144,13 +177,20 @@ export class AnalysisService {
     onProgress?: (message: string) => void | Promise<void>
   ): Promise<QnAResult> {
     const outputLanguage = lang === 'cn' ? 'Simplified Chinese' : 'English';
+    const now = new Date();
     
     // Notify before starting Google Search
     if (onProgress) {
       await onProgress(`Searching Google for: ${question.substring(0, 60)}...`);
     }
     
-    const prompt = `As a financial analyst, answer this question about "${companyName}" in ${outputLanguage}: "${question}". Provide a detailed, data-driven answer using the most recent information. Cite sources.`;
+    const prompt = `As a financial analyst, answer this question about "${companyName}" in ${outputLanguage}: "${question}".
+${buildRecencyGuidance(now)}
+Answer requirements:
+- Use freshest available data first; older data is secondary context only.
+- If the latest filing/period is unavailable, clearly disclose that limitation.
+- For key facts, include period labels (e.g. YYYY-Qx, YYYY annual report, YYYY-MM).
+- Cite sources.`;
 
     const response = await this.ai.models.generateContent({
       model: 'gemini-2.5-flash',
@@ -180,6 +220,7 @@ export class AnalysisService {
     lang: Language
   ): Promise<InvestmentConclusion> {
     const outputLanguage = lang === 'cn' ? 'Simplified Chinese' : 'English';
+    const now = new Date();
     const conclusionSectionSchema = {
       type: Type.OBJECT,
       properties: {
@@ -189,7 +230,10 @@ export class AnalysisService {
       required: ['summary', 'evidence'],
     };
 
-    const prompt = `Based on this Q&A for "${companyName}", synthesize an investment thesis in ${outputLanguage}. Structure the response into: "UpstreamSupplyChain", "MarketPosition", "BusinessModel", "Financials", "OutlookRisks". For each, provide a summary and list key evidence from the Q&A. Respond ONLY with a valid JSON object. Q&A: ${JSON.stringify(qna.map(item => ({ q: item.question, a: item.answer })))}`;
+    const prompt = `Based on this Q&A for "${companyName}", synthesize an investment thesis in ${outputLanguage}. Structure the response into: "UpstreamSupplyChain", "MarketPosition", "BusinessModel", "Financials", "OutlookRisks". For each, provide a summary and list key evidence from the Q&A.
+${buildRecencyGuidance(now)}
+When evidence conflicts across years, prioritize the latest period and explain differences briefly.
+Respond ONLY with a valid JSON object. Q&A: ${JSON.stringify(qna.map(item => ({ q: item.question, a: item.answer })))}`;
 
     const response = await this.ai.models.generateContent({
       model: 'gemini-2.5-flash',
@@ -219,6 +263,7 @@ export class AnalysisService {
     lang: Language
   ): Promise<FinalConclusion> {
     const outputLanguage = lang === 'cn' ? 'Simplified Chinese' : 'English';
+    const now = new Date();
 
     const finalConclusionSchema = {
       type: Type.OBJECT,
@@ -255,6 +300,7 @@ export class AnalysisService {
     1.  Formulate a clear, one-sentence overall conclusion (e.g., 'Strong Buy', 'Hold', 'Speculative Buy', 'Sell').
     2.  Provide 3-5 bullet points that summarize the most critical arguments supporting your conclusion.
     3.  For each argument, cite specific, quantitative evidence directly from the provided Q&A.
+    ${buildRecencyGuidance(now)}
     
     Respond ONLY with a valid JSON object matching the required schema.
     

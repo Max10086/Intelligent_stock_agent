@@ -43,22 +43,42 @@ class VertexAIClient {
       config?: any;
     }): Promise<GenerateContentResponse> => {
       try {
-        const response = await fetch(`${API_BASE_URL}/api/vertex-ai/generate-content`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            model: params.model,
-            contents: params.contents,
-            config: params.config,
-          }),
+        const requestBody = JSON.stringify({
+          model: params.model,
+          contents: params.contents,
+          config: params.config,
         });
 
+        const callBackend = async () =>
+          fetch(`${API_BASE_URL}/api/vertex-ai/generate-content`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: requestBody,
+          });
+
+        let response: Response;
+        try {
+          response = await callBackend();
+        } catch (firstError) {
+          // Retry once for transient proxy/startup race.
+          await new Promise(resolve => setTimeout(resolve, 300));
+          response = await callBackend();
+        }
+
         if (!response.ok) {
-          const errorData = await response.json().catch(() => ({}));
+          const bodyText = await response.text().catch(() => '');
+          const errorData = (() => {
+            try {
+              return bodyText ? JSON.parse(bodyText) : {};
+            } catch {
+              return {};
+            }
+          })();
           throw new Error(
             errorData.error || 
+            (bodyText && bodyText.slice(0, 200)) ||
             `HTTP error! status: ${response.status}`
           );
         }

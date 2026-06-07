@@ -5,6 +5,22 @@ import { AnalysisState } from '../../types.js';
 
 const router = express.Router();
 
+function isLikelyCorruptedReport(result: AnalysisState): boolean {
+  const allCompanies = [
+    result.focusCompany,
+    ...(result.candidateCompanies || []),
+  ].filter(Boolean);
+
+  const allQna = allCompanies.flatMap((company) => company?.qna || []);
+  if (allQna.length === 0) return false;
+
+  const questionPatternCount = allQna.filter((item) => /^Q\d+$/i.test(item.question?.trim() || '')).length;
+  const repeatedCharCount = allQna.filter((item) => /(.)\1{200,}/.test(item.answer || '')).length;
+
+  // Detect synthetic placeholder reports (e.g., Q0/Q1 + long repeated characters)
+  return questionPatternCount === allQna.length || repeatedCharCount > Math.floor(allQna.length / 2);
+}
+
 /**
  * POST /api/history
  * Save a completed analysis report to the database
@@ -89,6 +105,11 @@ router.get('/', async (req, res) => {
           // Parse the JSON result stored in the database
           const result: AnalysisState = JSON.parse(job.result!);
           
+          if (isLikelyCorruptedReport(result)) {
+            console.warn(`Skipping corrupted history payload for job ${job.id}`);
+            return null;
+          }
+
           // Ensure the result has required fields and is properly formatted
           return {
             ...result,

@@ -8,6 +8,25 @@ export interface CompanyProfile {
   currentPrice: string;
   weekChange: string;
   monthChange: string;
+  quoteTime?: string;
+  prevClose?: string;
+  openPrice?: string;
+  dayHigh?: string;
+  dayLow?: string;
+  dayChange?: string;
+  dayChangePct?: string;
+  volume?: string;
+  amount?: string;
+  turnoverRate?: string;
+  amplitude?: string;
+  peTtm?: string;
+  pb?: string;
+  marketCap?: string;
+  floatMarketCap?: string;
+  high52w?: string;
+  low52w?: string;
+  currency?: string;
+  dataSource?: string;
 }
 
 export interface QnAResult {

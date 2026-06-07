@@ -17,7 +17,8 @@ const HOST = '0.0.0.0';
 
 // Middleware
 app.use(cors());
-app.use(express.json());
+// Full analysis reports (multi-company Q&A) can exceed Express's default 100kb limit
+app.use(express.json({ limit: '10mb' }));
 
 // Health check
 app.get('/health', (req, res) => {

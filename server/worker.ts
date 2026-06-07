@@ -32,12 +32,20 @@ export async function startQueueWorker(): Promise<void> {
     // 2. 立即触发一次处理循环
     startQueueProcessing();
     
-    // 3. 设置“看门狗”定时器 (Watchdog)
-    // 每 10 秒检查一次。如果递归循环意外终止，这里会重新点火。
-    // 由于 processNextJob 内部有数据库锁机制，这里重复触发是安全的。
-    workerInterval = setInterval(() => {
-      startQueueProcessing();
-    }, 10000);
+    // 3. Watchdog: only re-trigger when there may be pending batch work
+    workerInterval = setInterval(async () => {
+      try {
+        const { prisma } = await import('./db.js');
+        const pendingCount = await prisma.analysisJob.count({
+          where: { status: 'PENDING' },
+        });
+        if (pendingCount > 0) {
+          startQueueProcessing();
+        }
+      } catch {
+        // Avoid spamming logs when DB is temporarily unavailable
+      }
+    }, 30000);
 
   } catch (error) {
     console.error('❌ Failed to start queue worker:', error);

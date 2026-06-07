@@ -15,10 +15,10 @@ export const AnalysisComponent: React.FC<AnalysisComponentProps> = ({ analysisSt
   const uiText = getUIText(language);
 
   React.useEffect(() => {
-    if (analysisState.focusCompany && !activeTab) {
-      setActiveTab(analysisState.focusCompany.id);
+    if (analysisState.focusCompany) {
+      setActiveTab(prev => prev ?? analysisState.focusCompany!.id);
     }
-  }, [analysisState.focusCompany, activeTab]);
+  }, [analysisState.focusCompany?.id]);
 
   if (analysisState.status === 'error') {
     return (
@@ -34,10 +34,18 @@ export const AnalysisComponent: React.FC<AnalysisComponentProps> = ({ analysisSt
   }
 
   const allCompanies = [analysisState.focusCompany, ...analysisState.candidateCompanies];
+  const reportTimestamp = analysisState.timestamp
+    ? new Date(analysisState.timestamp).toLocaleString()
+    : null;
 
   return (
     <div className="fade-in">
       <LoadingComponent stage={analysisState.currentStage} progress={analysisState.currentProgress} />
+      {reportTimestamp && (
+        <div className="mt-3 text-right text-xs text-gray-400">
+          {uiText.reportGeneratedAt}: {reportTimestamp}
+        </div>
+      )}
       
       <div className="mt-8">
         <div className="border-b border-gray-700">

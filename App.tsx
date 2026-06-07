@@ -15,7 +15,19 @@ const App: React.FC = () => {
   const [language, setLanguage] = useState<Language>('en');
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [currentView, setCurrentView] = useState<ViewMode>('single');
-  const { analysisState, history, isLoadingHistory, startAnalysis, resetAnalysis, loadFromHistory, deleteFromHistory, clearHistory } = useStockAgent();
+  const {
+    analysisState,
+    history,
+    isLoadingHistory,
+    saveStatus,
+    saveMessage,
+    startAnalysis,
+    resetAnalysis,
+    loadFromHistory,
+    deleteFromHistory,
+    clearHistory,
+    dismissSaveNotice,
+  } = useStockAgent();
   const { activeBatchJobId, batchJobStatus, isPolling, submitBatchJob, clearBatchJob } = useBatchJobs();
 
   const handleSearch = useCallback((query: string) => {
@@ -70,6 +82,23 @@ const App: React.FC = () => {
         onViewChange={handleViewChange}
       />
       <main className="container mx-auto px-4 py-8">
+        {saveStatus !== 'idle' && saveMessage && (
+          <div className={`max-w-4xl mx-auto mb-4 rounded-lg border px-4 py-3 flex items-center justify-between ${
+            saveStatus === 'success'
+              ? 'bg-green-900/20 border-green-500/40 text-green-300'
+              : saveStatus === 'error'
+                ? 'bg-red-900/20 border-red-500/40 text-red-300'
+                : 'bg-blue-900/20 border-blue-500/40 text-blue-300'
+          }`}>
+            <span className="text-sm font-medium">{saveMessage}</span>
+            <button
+              onClick={dismissSaveNotice}
+              className="ml-3 rounded px-2 py-1 text-xs text-gray-200 hover:bg-white/10"
+            >
+              {language === 'cn' ? '关闭' : 'Dismiss'}
+            </button>
+          </div>
+        )}
         {currentView === 'batch' ? (
           <BatchQueuePage language={language} setLanguage={setLanguage} />
         ) : (

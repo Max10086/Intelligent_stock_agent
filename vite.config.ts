@@ -12,11 +12,11 @@ export default defineConfig({
   // Server configuration for development
   server: {
     port: 3000,
+    strictPort: true, // never fall back to 3001 (backend uses that port)
     open: true,
-    // Proxy API requests to backend server
     proxy: {
       '/api': {
-        target: 'http://localhost:3001',
+        target: 'http://127.0.0.1:3001',
         changeOrigin: true,
         secure: false,
       },

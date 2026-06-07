@@ -4,12 +4,140 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { CompanyAnalysis, Language, QnAResult } from '../types.ts';
 import { getUIText } from '../constants.ts';
-import { ChevronDownIcon, LinkIcon, LightBulbIcon, DocumentTextIcon, ChartBarIcon, BriefcaseIcon, ScaleIcon, ShieldExclamationIcon, StarIcon, CurrencyDollarIcon, CalendarDaysIcon, CalendarIcon } from './icons.tsx';
+import { ChevronDownIcon, LinkIcon, LightBulbIcon, DocumentTextIcon, ChartBarIcon, BriefcaseIcon, ScaleIcon, ShieldExclamationIcon, StarIcon, CurrencyDollarIcon } from './icons.tsx';
 
 interface CompanyReportProps {
   companyAnalysis: CompanyAnalysis;
   language: Language;
 }
+
+interface PeriodPoint {
+  score: number;
+  label: string;
+}
+
+const parsePeriods = (text: string): PeriodPoint[] => {
+  const periods: PeriodPoint[] = [];
+  const seen = new Set<string>();
+
+  const addPeriod = (label: string, score: number) => {
+    const key = `${label}-${score}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      periods.push({ label, score });
+    }
+  };
+
+  const monthMatches = text.matchAll(/\b(20\d{2})[-/.](0?[1-9]|1[0-2])\b/g);
+  for (const match of monthMatches) {
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    addPeriod(`${year}-${String(month).padStart(2, '0')}`, year * 100 + month);
+  }
+
+  // Chinese month format, e.g. 2026年3月
+  const monthCnMatches = text.matchAll(/(20\d{2})年\s*(0?[1-9]|1[0-2])月/g);
+  for (const match of monthCnMatches) {
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    addPeriod(`${year}-${String(month).padStart(2, '0')}`, year * 100 + month);
+  }
+
+  const quarterMatches = text.matchAll(/\b(20\d{2})\s*[- ]?Q([1-4])\b/gi);
+  for (const match of quarterMatches) {
+    const year = Number(match[1]);
+    const quarter = Number(match[2]);
+    addPeriod(`${year}-Q${quarter}`, year * 100 + quarter * 3);
+  }
+
+  const quarterCnMatches = text.matchAll(/(20\d{2})年\s*([1-4])季度/g);
+  for (const match of quarterCnMatches) {
+    const year = Number(match[1]);
+    const quarter = Number(match[2]);
+    addPeriod(`${year}-Q${quarter}`, year * 100 + quarter * 3);
+  }
+
+  // Chinese quarter format with numerals, e.g. 2026年第一季度 / 2026年一季度
+  const quarterCnWordMatches = text.matchAll(/(20\d{2})年\s*第?\s*([一二三四])\s*季度/g);
+  const quarterWordMap: Record<string, number> = { 一: 1, 二: 2, 三: 3, 四: 4 };
+  for (const match of quarterCnWordMatches) {
+    const year = Number(match[1]);
+    const quarter = quarterWordMap[match[2]];
+    if (quarter) {
+      addPeriod(`${year}-Q${quarter}`, year * 100 + quarter * 3);
+    }
+  }
+
+  const annualMatches = text.matchAll(/(20\d{2})\s*(annual|year-end|fy|fiscal year|年报|财年|年度报告)/gi);
+  for (const match of annualMatches) {
+    const year = Number(match[1]);
+    addPeriod(`${year}-FY`, year * 100 + 12);
+  }
+
+  return periods;
+};
+
+const buildFreshnessAudit = (qna: QnAResult[]) => {
+  const now = new Date();
+  const cutoff = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
+  const cutoffScore = cutoff.getFullYear() * 100 + (cutoff.getMonth() + 1);
+  const currentYear = now.getFullYear();
+  const month = now.getMonth() + 1;
+  const latestQuarterTarget =
+    month <= 4 ? { year: currentYear - 1, quarter: 3 } :
+    month <= 7 ? { year: currentYear, quarter: 1 } :
+    month <= 10 ? { year: currentYear, quarter: 2 } :
+    { year: currentYear, quarter: 3 };
+  const latestAnnualYearTarget = currentYear - 1;
+
+  let latest: PeriodPoint | null = null;
+  let recentCount = 0;
+  let fallbackCount = 0;
+  let hasLatestQuarter = false;
+  let hasLatestAnnual = false;
+
+  for (const item of qna) {
+    const sourceText = (item.sources || [])
+      .map((source) => `${source.title || ''} ${source.uri || ''}`)
+      .join(' ');
+    const combinedText = `${item.question || ''}\n${item.answer || ''}\n${sourceText}`;
+    const periods = parsePeriods(combinedText);
+
+    if (periods.some((period) => period.score >= cutoffScore)) {
+      recentCount += 1;
+    }
+
+    if (periods.some((period) => period.label.startsWith(`${latestQuarterTarget.year}-Q${latestQuarterTarget.quarter}`))) {
+      hasLatestQuarter = true;
+    }
+    if (new RegExp(`(${latestAnnualYearTarget}[\\s-]*(annual|year-end|fy|fiscal year|年报|财年|年度报告))`, 'i').test(combinedText)) {
+      hasLatestAnnual = true;
+    }
+
+    const bestForAnswer = periods.sort((a, b) => b.score - a.score)[0];
+    if (bestForAnswer) {
+      if (!latest || bestForAnswer.score > latest.score) {
+        latest = bestForAnswer;
+      }
+      const year = Math.floor(bestForAnswer.score / 100);
+      if (year <= currentYear - 2) {
+        fallbackCount += 1;
+      }
+    } else {
+      fallbackCount += 1;
+    }
+  }
+
+  return {
+    latestLabel: latest?.label || 'N/A',
+    recentCoverage: qna.length > 0 ? `${recentCount}/${qna.length}` : '0/0',
+    hasLatestQuarter,
+    hasLatestAnnual,
+    latestQuarterLabel: `${latestQuarterTarget.year}-Q${latestQuarterTarget.quarter}`,
+    latestAnnualLabel: `${latestAnnualYearTarget}-FY`,
+    fallbackCount,
+  };
+};
 
 const AccordionItem: React.FC<{ item: QnAResult; language: Language }> = ({ item, language }) => {
   const [isOpen, setIsOpen] = useState(false);
@@ -83,6 +211,9 @@ const ConclusionSection: React.FC<{ title: string; data: { summary: string; evid
 export const CompanyReport: React.FC<CompanyReportProps> = ({ companyAnalysis, language }) => {
   const uiText = getUIText(language);
   const { profile, status, qna, conclusion, finalConclusion } = companyAnalysis;
+  const freshnessAudit = buildFreshnessAudit(qna);
+  const yesLabel = language === 'cn' ? '是' : 'Yes';
+  const noLabel = language === 'cn' ? '否' : 'No';
 
   const conclusionSections = conclusion ? [
     { title: uiText.conclusion.UpstreamSupplyChain, data: conclusion.UpstreamSupplyChain },
@@ -109,6 +240,21 @@ export const CompanyReport: React.FC<CompanyReportProps> = ({ companyAnalysis, l
     return 'text-gray-400';
   };
 
+  const formatMetricNumber = (value?: string) => {
+    if (!value) return 'N/A';
+    const parsed = parseFloat(value);
+    if (isNaN(parsed)) return 'N/A';
+    return parsed.toFixed(2);
+  };
+
+  const formatPe = (value?: string) => {
+    if (!value) return 'N/A';
+    const parsed = parseFloat(value);
+    if (isNaN(parsed)) return 'N/A';
+    if (parsed < 0) return uiText.profitLoss;
+    return parsed.toFixed(2);
+  };
+
   return (
     <div className="space-y-8 fade-in">
       <section className="bg-gray-800 p-6 rounded-lg shadow-lg">
@@ -118,22 +264,41 @@ export const CompanyReport: React.FC<CompanyReportProps> = ({ companyAnalysis, l
               <p className="text-gray-400">{profile.name}</p>
               <p className="text-lg font-semibold text-white">{profile.ticker} ({profile.exchange})</p>
           </div>
-          <div className="md:col-span-2 grid grid-cols-3 gap-6">
+          <div className="md:col-span-2 grid grid-cols-4 gap-6">
               <div>
                   <p className="text-gray-400 flex items-center gap-1"><CurrencyDollarIcon className="w-4 h-4"/> {uiText.currentPrice}</p>
                   <p className="text-lg font-semibold text-white">{formatPrice(profile.currentPrice)}</p>
               </div>
               <div>
-                  <p className="text-gray-400 flex items-center gap-1"><CalendarDaysIcon className="w-4 h-4"/> {uiText.weekChange}</p>
-                  <p className={`text-lg font-semibold ${getChangeColor(profile.weekChange)}`}>{profile.weekChange}</p>
+                  <p className="text-gray-400">{uiText.dayChangePct}</p>
+                  <p className={`text-lg font-semibold ${getChangeColor(profile.dayChangePct)}`}>{profile.dayChangePct || 'N/A'}</p>
               </div>
               <div>
-                  <p className="text-gray-400 flex items-center gap-1"><CalendarIcon className="w-4 h-4"/> {uiText.monthChange}</p>
-                  <p className={`text-lg font-semibold ${getChangeColor(profile.monthChange)}`}>{profile.monthChange}</p>
+                  <p className="text-gray-400">{uiText.high52w}/{uiText.low52w}</p>
+                  <p className="text-lg font-semibold text-white">
+                    {formatPrice(profile.high52w || '')} / {formatPrice(profile.low52w || '')}
+                  </p>
+              </div>
+              <div>
+                  <p className="text-gray-400">{uiText.peTtm}</p>
+                  <p className="text-lg font-semibold text-white">{formatPe(profile.peTtm)}</p>
               </div>
           </div>
         </div>
       </section>
+
+      {qna.length > 0 && (
+        <section className="bg-gray-800/60 p-4 rounded-lg border border-blue-900/60">
+          <h3 className="text-sm font-semibold text-blue-300 mb-2">{uiText.freshnessAuditTitle}</h3>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs text-gray-300">
+            <p>{uiText.freshnessLatestPeriod}: <span className="text-gray-100">{freshnessAudit.latestLabel}</span></p>
+            <p>{uiText.freshnessRecentCoverage}: <span className="text-gray-100">{freshnessAudit.recentCoverage}</span></p>
+            <p>{uiText.freshnessLatestQuarter}: <span className={freshnessAudit.hasLatestQuarter ? 'text-green-300' : 'text-yellow-300'}>{freshnessAudit.hasLatestQuarter ? yesLabel : noLabel}</span> <span className="text-gray-400">({freshnessAudit.latestQuarterLabel})</span></p>
+            <p>{uiText.freshnessLatestAnnual}: <span className={freshnessAudit.hasLatestAnnual ? 'text-green-300' : 'text-yellow-300'}>{freshnessAudit.hasLatestAnnual ? yesLabel : noLabel}</span> <span className="text-gray-400">({freshnessAudit.latestAnnualLabel})</span></p>
+            <p>{uiText.freshnessFallbackCount}: <span className={freshnessAudit.fallbackCount > 0 ? 'text-yellow-300' : 'text-green-300'}>{freshnessAudit.fallbackCount}</span></p>
+          </div>
+        </section>
+      )}
 
       {status === 'complete' && finalConclusion && (
         <section className="bg-gray-800 p-6 rounded-lg shadow-lg">
@@ -180,6 +345,16 @@ export const CompanyReport: React.FC<CompanyReportProps> = ({ companyAnalysis, l
         <div className="text-center py-8">
           <div className="spinner w-8 h-8 mx-auto"></div>
           <p className="mt-2 text-gray-400">Fetching detailed analysis...</p>
+        </div>
+      )}
+
+      {status === 'complete' && qna.length === 0 && !conclusion && !finalConclusion && (
+        <div className="text-center py-8 bg-yellow-900/20 border border-yellow-600/50 rounded-lg">
+          <p className="text-yellow-300">
+            {language === 'cn'
+              ? '分析已完成，但报告内容未能正确加载。请尝试重新分析。'
+              : 'Analysis completed, but report content failed to load. Please try running the analysis again.'}
+          </p>
         </div>
       )}
     </div>
