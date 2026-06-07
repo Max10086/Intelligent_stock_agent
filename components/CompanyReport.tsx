@@ -231,7 +231,7 @@ export const CompanyReport: React.FC<CompanyReportProps> = ({ companyAnalysis, l
     return new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(price);
   }
 
-  const getChangeColor = (changeStr: string) => {
+  const getChangeColor = (changeStr?: string) => {
     if (!changeStr) return 'text-gray-400';
     const change = parseFloat(changeStr);
     if (isNaN(change)) return 'text-gray-400';
