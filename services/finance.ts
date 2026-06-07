@@ -41,6 +41,154 @@ const tencentExchangeToAppExchange = (tencentCode: string, prefix: string): stri
     return 'UNKNOWN';
 };
 
+const looksLikeTicker = (query: string): boolean => /^[A-Za-z0-9.\-]{1,10}$/.test(query.trim());
+
+const COMPANY_QUERY_ALIAS: Record<string, string> = {
+    '闪迪': 'sandisk',
+    'sandisk': 'sandisk',
+    '西部数据': 'western digital',
+    '西数': 'western digital',
+};
+
+const normalizeCompanyQuery = (query: string): string[] => {
+    const trimmed = query.trim();
+    if (!trimmed) return [];
+    const lower = trimmed.toLowerCase();
+    const mapped = COMPANY_QUERY_ALIAS[lower] || COMPANY_QUERY_ALIAS[trimmed] || '';
+    const hasNonAscii = /[^\x00-\x7F]/.test(trimmed);
+    const candidates: string[] = [];
+    if (!hasNonAscii || !mapped) candidates.push(trimmed);
+    if (mapped && !candidates.includes(mapped)) candidates.push(mapped);
+    return candidates;
+};
+
+const yahooExchangeToAppExchange = (exchange?: string): string => {
+    const ex = (exchange || '').toUpperCase();
+    if (['NMS', 'NAS', 'NGM', 'NYQ', 'ASE', 'PCX'].includes(ex)) return 'NASDAQ';
+    if (['HKG', 'HKGSI'].includes(ex)) return 'HKEX';
+    if (['SHH'].includes(ex)) return 'SSE';
+    if (['SHE', 'SHZ'].includes(ex)) return 'SZSE';
+    return 'UNKNOWN';
+};
+
+const smartboxPrefixToExchange = (prefix: string): string => {
+    const p = prefix.toLowerCase();
+    if (p === 'us') return 'NASDAQ';
+    if (p === 'hk') return 'HKEX';
+    if (p === 'sh') return 'SSE';
+    if (p === 'sz') return 'SZSE';
+    return 'UNKNOWN';
+};
+
+const decodeUnicodeEscapes = (value: string): string => {
+    if (!value) return value;
+    if (!value.includes('\\u')) return value;
+    try {
+        const safe = value.replace(/"/g, '\\"');
+        return JSON.parse(`"${safe}"`);
+    } catch {
+        return value;
+    }
+};
+
+const validateTickerViaTencent = async (ticker: string, exchange: string): Promise<boolean> => {
+    const formatted = formatTickerForTencent(ticker, exchange);
+    try {
+        const res = await fetchWithRetry(`https://qt.gtimg.cn/q=${formatted}`);
+        const text = await res.text();
+        return text.includes('~') && !text.includes('v_pv_none_match=1');
+    } catch {
+        return false;
+    }
+};
+
+const searchTickerByTencentSmartbox = async (query: string): Promise<Pick<CompanyProfile, 'name' | 'ticker' | 'exchange'> | null> => {
+    const url = `https://smartbox.gtimg.cn/s3/?v=2&q=${encodeURIComponent(query)}&t=all`;
+    const res = await fetchWithRetry(url);
+    const text = await res.text();
+    const match = text.match(/v_hint="([^"]*)"/);
+    if (!match || !match[1]) return null;
+
+    const entries = match[1].split('^');
+    const queryLower = query.trim().toLowerCase();
+    const candidates: Array<{ score: number; name: string; ticker: string; exchange: string }> = [];
+
+    for (const entry of entries) {
+        const parts = entry.split('~');
+        // Typical shape: marketPrefix ~ code.suffix ~ name ~ pinyin ~ type
+        if (parts.length < 5) continue;
+        const marketPrefix = parts[0];
+        const rawCode = parts[1] || '';
+        const name = decodeUnicodeEscapes(parts[2] || '');
+        const secType = (parts[4] || '').toUpperCase();
+        const exchange = smartboxPrefixToExchange(marketPrefix);
+        if (exchange === 'UNKNOWN') continue;
+        if (secType !== 'GP') continue; // skip options/warrants/structured products
+
+        const ticker = rawCode.split('.')[0].toUpperCase();
+        if (!ticker || ticker.includes('-') || ticker.includes('=')) continue;
+
+        let score = 0;
+        const nameLower = name.toLowerCase();
+        if (nameLower === queryLower) score += 100;
+        else if (nameLower.includes(queryLower) || queryLower.includes(nameLower)) score += 60;
+        if (exchange === 'NASDAQ') score += 5; // mild preference for US when ties
+
+        candidates.push({ score, name, ticker, exchange });
+    }
+
+    candidates.sort((a, b) => b.score - a.score);
+    for (const c of candidates) {
+        const isValid = await validateTickerViaTencent(c.ticker, c.exchange);
+        if (!isValid) continue;
+        return { name: c.name, ticker: c.ticker, exchange: c.exchange };
+    }
+
+    return null;
+};
+
+const searchTickerByCompanyName = async (query: string): Promise<Pick<CompanyProfile, 'name' | 'ticker' | 'exchange'> | null> => {
+    // 1) Tencent SmartBox supports Chinese names well.
+    try {
+        const bySmartbox = await searchTickerByTencentSmartbox(query);
+        if (bySmartbox) return bySmartbox;
+    } catch (error) {
+        console.warn(`Smartbox search failed for ${query}`, error);
+    }
+
+    // 2) Yahoo fallback for English names/aliases.
+    const candidates = normalizeCompanyQuery(query);
+    for (const candidate of candidates) {
+        try {
+            const url = `https://query2.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(candidate)}`;
+            const res = await fetchWithRetry(url, {
+                headers: { 'User-Agent': 'Mozilla/5.0' },
+            });
+            const json = await res.json();
+            const quotes = Array.isArray(json?.quotes) ? json.quotes : [];
+            for (const q of quotes) {
+                const symbol = (q?.symbol || '').toString().trim();
+                const exchange = yahooExchangeToAppExchange(q?.exchange || q?.exchDisp);
+                if (!symbol || exchange === 'UNKNOWN') continue;
+                // Filter out derivatives/OTC-like symbols for primary listing match.
+                if (symbol.includes('-') || symbol.includes('=')) continue;
+
+                const isValid = await validateTickerViaTencent(symbol, exchange);
+                if (!isValid) continue;
+
+                return {
+                    name: q?.longname || q?.shortname || candidate,
+                    ticker: symbol.toUpperCase(),
+                    exchange,
+                };
+            }
+        } catch (error) {
+            console.warn(`Company search failed for ${candidate}`, error);
+        }
+    }
+    return null;
+};
+
 interface Candle {
     date: Date;
     close: number;
@@ -192,37 +340,41 @@ const fetchUsNasdaqCandles = async (ticker: string): Promise<Candle[]> => {
 };
 
 export const searchTicker = async (query: string): Promise<Pick<CompanyProfile, 'name' | 'ticker' | 'exchange'> | null> => {
-    // ... (保持不变) ...
-    const upperQuery = query.toUpperCase();
-    const potentialPrefixes = ['us', 'sh', 'sz', 'hk'];
+    const trimmed = query.trim();
+    const upperQuery = trimmed.toUpperCase();
 
-    for (const prefix of potentialPrefixes) {
-        const formattedTicker = `${prefix}${upperQuery}`;
-        try {
-            const res = await fetch(`https://qt.gtimg.cn/q=${formattedTicker}`);
-            if (!res.ok) continue;
+    // 1) Prefer direct ticker probing for ticker-like inputs.
+    if (looksLikeTicker(trimmed)) {
+        const potentialPrefixes = ['us', 'sh', 'sz', 'hk'];
+        for (const prefix of potentialPrefixes) {
+            const formattedTicker = `${prefix}${upperQuery}`;
+            try {
+                const res = await fetchWithRetry(`https://qt.gtimg.cn/q=${formattedTicker}`);
+                if (!res.ok) continue;
 
-            const text = await res.text();
-            if (text.includes('~') && !text.includes('v_pv_none_match=1')) {
-                const dataStr = text.substring(text.indexOf('"') + 1, text.lastIndexOf('"'));
-                const parts = dataStr.split('~');
-                if (parts.length > 2 && parts[1]) {
-                    const name = parts[1];
-                    const tickerWithExchange = parts[2];
-                    const ticker = upperQuery;
-                    const exchange = tencentExchangeToAppExchange(tickerWithExchange, prefix);
-                    
-                    if (exchange !== 'UNKNOWN') {
-                        return { name, ticker, exchange };
+                const text = await res.text();
+                if (text.includes('~') && !text.includes('v_pv_none_match=1')) {
+                    const dataStr = text.substring(text.indexOf('"') + 1, text.lastIndexOf('"'));
+                    const parts = dataStr.split('~');
+                    if (parts.length > 2 && parts[1]) {
+                        const name = parts[1];
+                        const tickerWithExchange = parts[2];
+                        const ticker = upperQuery;
+                        const exchange = tencentExchangeToAppExchange(tickerWithExchange, prefix);
+
+                        if (exchange !== 'UNKNOWN') {
+                            return { name, ticker, exchange };
+                        }
                     }
                 }
+            } catch (error) {
+                console.warn(`Ticker search failed for ${formattedTicker}`, error);
             }
-        } catch (error) {
-            console.warn(`Ticker search failed for ${formattedTicker}`, error);
-            continue;
         }
     }
-    return null;
+
+    // 2) Company-name search fallback (handles queries like "闪迪").
+    return await searchTickerByCompanyName(trimmed);
 };
 
 export const getFinancialData = async (

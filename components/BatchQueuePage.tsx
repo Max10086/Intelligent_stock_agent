@@ -11,6 +11,10 @@ interface BatchQueuePageProps {
 interface QueueJob {
   id: string;
   ticker: string;
+  companyName?: string | null;
+  overallConclusion?: string | null;
+  currentPrice?: string | null;
+  currency?: string | null;
   status: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
   createdAt: string;
   completedAt: string | null;
@@ -54,8 +58,12 @@ export const BatchQueuePage: React.FC<BatchQueuePageProps> = ({ language, setLan
       const transformedJobs: QueueJob[] = (data.jobs || []).map((job: any) => ({
         id: job.id,
         ticker: job.ticker,
+        companyName: job.companyName ?? null,
+        overallConclusion: job.overallConclusion ?? null,
+        currentPrice: job.currentPrice ?? null,
+        currency: job.currency ?? null,
         status: job.status as 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED',
-        createdAt: job.createdAt || job.createdAt,
+        createdAt: job.createdAt,
         completedAt: job.completedAt || null,
         result: job.result || null,
         progress: job.progress ?? 0,
@@ -135,7 +143,16 @@ export const BatchQueuePage: React.FC<BatchQueuePageProps> = ({ language, setLan
   const formatDateTime = (dateString: string | null) => {
     if (!dateString) return '-';
     const date = new Date(dateString);
-    return date.toLocaleString();
+    if (Number.isNaN(date.getTime())) return '-';
+    return date.toLocaleString(language === 'cn' ? 'zh-CN' : 'en-US', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    });
   };
 
   // Get status badge color
@@ -170,6 +187,95 @@ export const BatchQueuePage: React.FC<BatchQueuePageProps> = ({ language, setLan
     } else {
       return status;
     }
+  };
+
+  const formatPrice = (job: QueueJob) => {
+    if (!job.currentPrice || job.currentPrice === '0.00') return '-';
+    const inferCurrencyCode = () => {
+      const rawCurrency = (job.currency || '').trim();
+      if (rawCurrency) return rawCurrency.toUpperCase();
+
+      const ticker = (job.ticker || '').toUpperCase();
+      const exchange = (job.result?.focusCompany?.profile?.exchange || '').toUpperCase();
+
+      if (exchange.includes('NASDAQ') || exchange.includes('NYSE') || ticker.startsWith('US.')) {
+        return 'USD';
+      }
+      if (exchange.includes('HK') || ticker.startsWith('HK.')) {
+        return 'HKD';
+      }
+      if (exchange.includes('SSE') || exchange.includes('SZSE') || ticker.startsWith('SH') || ticker.startsWith('SZ')) {
+        return 'CNY';
+      }
+
+      return '';
+    };
+
+    const currencyCode = inferCurrencyCode();
+    const currencySymbolMap: Record<string, string> = {
+      USD: '$',
+      HKD: 'HK$',
+      CNY: '¥',
+      RMB: '¥',
+      CNH: '¥',
+      JPY: 'JPY¥',
+      EUR: 'EUR€',
+      GBP: 'GBP£',
+    };
+
+    const symbol = currencySymbolMap[currencyCode];
+    if (symbol) {
+      return `${symbol}${job.currentPrice}`;
+    }
+
+    if (job.currency) {
+      return `${job.currentPrice} ${job.currency}`;
+    }
+    return job.currentPrice;
+  };
+
+  const getConclusionTag = (job: QueueJob): {
+    label: string;
+    className: string;
+  } | null => {
+    const text = (job.overallConclusion || '').toLowerCase().trim();
+    if (!text) return null;
+
+    if (text.includes('strong buy') || text.includes('conviction buy') || text.includes('强烈买入')) {
+      return {
+        label: language === 'cn' ? '强烈买入' : 'Strong Buy',
+        className: 'bg-emerald-500/20 text-emerald-300 border-emerald-500',
+      };
+    }
+    if (text.includes('buy') || text.includes('增持') || text.includes('买入') || text.includes('推荐')) {
+      return {
+        label: language === 'cn' ? '买入' : 'Buy',
+        className: 'bg-green-500/20 text-green-300 border-green-500',
+      };
+    }
+    if (text.includes('strong sell') || text.includes('reduce') || text.includes('强烈卖出')) {
+      return {
+        label: language === 'cn' ? '强烈卖出' : 'Strong Sell',
+        className: 'bg-red-600/20 text-red-300 border-red-600',
+      };
+    }
+    if (text.includes('sell') || text.includes('减持') || text.includes('卖出')) {
+      return {
+        label: language === 'cn' ? '卖出' : 'Sell',
+        className: 'bg-red-500/20 text-red-300 border-red-500',
+      };
+    }
+    if (text.includes('hold') || text.includes('neutral') || text.includes('中性') || text.includes('持有')) {
+      return {
+        label: language === 'cn' ? '持有' : 'Hold',
+        className: 'bg-yellow-500/20 text-yellow-300 border-yellow-500',
+      };
+    }
+
+    return {
+      label: language === 'cn' ? '未分类' : 'Unclassified',
+      className: 'bg-slate-500/20 text-slate-300 border-slate-500',
+    };
   };
 
   // Load report (set analysis state from result)
@@ -265,22 +371,41 @@ export const BatchQueuePage: React.FC<BatchQueuePageProps> = ({ language, setLan
 
         {queueStatus && queueStatus.jobs.length > 0 ? (
           <div className="overflow-x-auto">
-            <table className="w-full">
+            <table className="w-full table-fixed">
+              <colgroup>
+                <col className="w-[8%]" />
+                <col className="w-[14%]" />
+                <col className="w-[10%]" />
+                <col className="w-[15%]" />
+                <col className="w-[16%]" />
+                <col className="w-[13%]" />
+                <col className="w-[13%]" />
+                <col className="w-[11%]" />
+              </colgroup>
               <thead>
                 <tr className="border-b border-gray-700">
-                  <th className="text-left py-3 px-4 text-gray-400 font-semibold">
+                  <th className="text-left py-3 px-2 text-gray-400 font-semibold">
                     {language === 'en' ? 'Ticker' : '股票代码'}
                   </th>
-                  <th className="text-left py-3 px-4 text-gray-400 font-semibold">
+                  <th className="text-left py-3 px-2 text-gray-400 font-semibold">
+                    {language === 'en' ? 'Company' : '公司名称'}
+                  </th>
+                  <th className="text-left py-3 px-2 text-gray-400 font-semibold">
+                    {language === 'en' ? 'Price' : '股价'}
+                  </th>
+                  <th className="text-left py-3 px-2 text-gray-400 font-semibold">
+                    {language === 'en' ? 'Conclusion' : '结论'}
+                  </th>
+                  <th className="text-left py-3 px-2 text-gray-400 font-semibold">
                     {language === 'en' ? 'Status & Progress' : '状态与进度'}
                   </th>
-                  <th className="text-left py-3 px-4 text-gray-400 font-semibold">
+                  <th className="text-left py-3 px-2 text-gray-400 font-semibold">
                     {language === 'en' ? 'Created' : '创建时间'}
                   </th>
-                  <th className="text-left py-3 px-4 text-gray-400 font-semibold">
+                  <th className="text-left py-3 px-2 text-gray-400 font-semibold">
                     {language === 'en' ? 'Completed' : '完成时间'}
                   </th>
-                  <th className="text-left py-3 px-4 text-gray-400 font-semibold">
+                  <th className="text-left py-3 px-2 text-gray-400 font-semibold">
                     {language === 'en' ? 'Actions' : '操作'}
                   </th>
                 </tr>
@@ -288,12 +413,35 @@ export const BatchQueuePage: React.FC<BatchQueuePageProps> = ({ language, setLan
               <tbody>
                 {queueStatus.jobs.map((job) => (
                   <tr key={job.id} className="border-b border-gray-700/50 hover:bg-gray-700/30">
-                    <td className="py-3 px-4 font-medium text-blue-400">{job.ticker}</td>
-                    <td className="py-3 px-4">
-                      <div className="space-y-2 min-w-[300px]">
+                    <td className="py-3 px-2 font-medium text-blue-400 truncate" title={job.ticker}>{job.ticker}</td>
+                    <td className="py-3 px-2 text-gray-200 text-sm truncate" title={job.companyName || ''}>
+                      {job.companyName || '-'}
+                    </td>
+                    <td className="py-3 px-2 text-gray-200 text-sm whitespace-nowrap truncate" title={formatPrice(job)}>
+                      {formatPrice(job)}
+                    </td>
+                    <td className="py-3 px-2 text-gray-300 text-sm" title={job.overallConclusion || ''}>
+                      {job.overallConclusion ? (
+                        <div className="space-y-1">
+                          {(() => {
+                            const tag = getConclusionTag(job);
+                            return tag ? (
+                              <span className={`inline-block px-2 py-0.5 rounded text-xs font-semibold border ${tag.className}`}>
+                                {tag.label}
+                              </span>
+                            ) : null;
+                          })()}
+                          <div className="text-gray-400 text-xs truncate">{job.overallConclusion}</div>
+                        </div>
+                      ) : (
+                        '-'
+                      )}
+                    </td>
+                    <td className="py-3 px-2">
+                      <div className="space-y-2">
                         {/* Status Badge */}
                         <div className="flex items-center gap-2">
-                          <span className={`inline-block px-2 py-1 rounded text-xs font-semibold border ${getStatusBadgeClass(job.status)}`}>
+                          <span className={`inline-block px-2 py-0.5 rounded text-xs font-semibold border leading-tight ${getStatusBadgeClass(job.status)}`}>
                             {getStatusText(job.status)}
                           </span>
                           {job.status === 'PROCESSING' && job.progress !== undefined && (
@@ -340,17 +488,17 @@ export const BatchQueuePage: React.FC<BatchQueuePageProps> = ({ language, setLan
                         )}
                       </div>
                     </td>
-                    <td className="py-3 px-4 text-gray-400 text-sm">
+                    <td className="py-3 px-2 text-gray-400 text-sm truncate" title={formatDateTime(job.createdAt)}>
                       {formatDateTime(job.createdAt)}
                     </td>
-                    <td className="py-3 px-4 text-gray-400 text-sm">
+                    <td className="py-3 px-2 text-gray-400 text-sm truncate" title={formatDateTime(job.completedAt)}>
                       {formatDateTime(job.completedAt)}
                     </td>
-                    <td className="py-3 px-4">
+                    <td className="py-3 px-2">
                       {job.status === 'COMPLETED' && job.result ? (
                         <button
                           onClick={() => handleLoadReport(job)}
-                          className="px-3 py-1 bg-blue-600 hover:bg-blue-700 rounded text-sm text-white transition-colors"
+                          className="px-2 py-1 bg-blue-600 hover:bg-blue-700 rounded text-xs text-white transition-colors whitespace-nowrap"
                         >
                           {language === 'en' ? 'View Report' : '查看报告'}
                         </button>

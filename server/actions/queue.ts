@@ -10,6 +10,10 @@ import { JobStatus } from '@prisma/client';
 export interface QueueJob {
   id: string;
   ticker: string;
+  companyName?: string | null;
+  overallConclusion?: string | null;
+  currentPrice?: string | null;
+  currency?: string | null;
   query: string;
   status: JobStatus;
   createdAt: Date;
@@ -23,6 +27,31 @@ export interface QueueJob {
   progress?: number;
   currentStep?: string | null;
   logs?: string[] | null;
+}
+
+function extractJobSummary(result: any): {
+  companyName: string | null;
+  overallConclusion: string | null;
+  currentPrice: string | null;
+  currency: string | null;
+} {
+  if (!result || typeof result !== 'object') {
+    return { companyName: null, overallConclusion: null, currentPrice: null, currency: null };
+  }
+
+  const focusCompany = (result as any).focusCompany;
+  const companyName =
+    typeof focusCompany?.profile?.name === 'string' ? focusCompany.profile.name : null;
+  const overallConclusion =
+    typeof focusCompany?.finalConclusion?.overall_conclusion === 'string'
+      ? focusCompany.finalConclusion.overall_conclusion
+      : null;
+  const currentPrice =
+    typeof focusCompany?.profile?.currentPrice === 'string' ? focusCompany.profile.currentPrice : null;
+  const currency =
+    typeof focusCompany?.profile?.currency === 'string' ? focusCompany.profile.currency : null;
+
+  return { companyName, overallConclusion, currentPrice, currency };
 }
 
 export interface QueueStatus {
@@ -80,20 +109,29 @@ export async function addToQueue(
     );
 
     // Transform to QueueJob format
-    const queueJobs: QueueJob[] = jobs.map(job => ({
-      id: job.id,
-      ticker: job.ticker,
-      query: job.query,
-      status: job.status as JobStatus,
-      createdAt: job.createdAt,
-      updatedAt: job.updatedAt,
-      startedAt: job.startedAt,
-      completedAt: job.completedAt,
-      error: job.error,
-      result: job.result ? JSON.parse(job.result) : null,
-      reportId: null, // Can be added later if needed
-      batchJobId: job.batchJobId || null,
-    }));
+    const queueJobs: QueueJob[] = jobs.map(job => {
+      const parsedResult = job.result ? JSON.parse(job.result) : null;
+      const { companyName, overallConclusion, currentPrice, currency } = extractJobSummary(parsedResult);
+
+      return {
+        id: job.id,
+        ticker: job.ticker,
+        companyName,
+        overallConclusion,
+        currentPrice,
+        currency,
+        query: job.query,
+        status: job.status as JobStatus,
+        createdAt: job.createdAt,
+        updatedAt: job.updatedAt,
+        startedAt: job.startedAt,
+        completedAt: job.completedAt,
+        error: job.error,
+        result: parsedResult,
+        reportId: null, // Can be added later if needed
+        batchJobId: job.batchJobId || null,
+      };
+    });
 
     return {
       jobIds: jobs.map(j => j.id),
@@ -155,23 +193,32 @@ export async function getQueueStatus(options?: {
     ]);
 
     // Transform to QueueJob format
-    const queueJobs: QueueJob[] = jobs.map(job => ({
-      id: job.id,
-      ticker: job.ticker,
-      query: job.query,
-      status: job.status as JobStatus,
-      createdAt: job.createdAt,
-      updatedAt: job.updatedAt,
-      startedAt: job.startedAt,
-      completedAt: job.completedAt,
-      error: job.error,
-      result: job.result ? JSON.parse(job.result) : null,
-      reportId: null, // Can be added later if reportId field exists
-      batchJobId: job.batchJobId || null,
-      progress: job.progress ?? 0,
-      currentStep: job.currentStep ?? null,
-      logs: job.logs ? JSON.parse(job.logs) : null,
-    }));
+    const queueJobs: QueueJob[] = jobs.map(job => {
+      const parsedResult = job.result ? JSON.parse(job.result) : null;
+      const { companyName, overallConclusion, currentPrice, currency } = extractJobSummary(parsedResult);
+
+      return {
+        id: job.id,
+        ticker: job.ticker,
+        companyName,
+        overallConclusion,
+        currentPrice,
+        currency,
+        query: job.query,
+        status: job.status as JobStatus,
+        createdAt: job.createdAt,
+        updatedAt: job.updatedAt,
+        startedAt: job.startedAt,
+        completedAt: job.completedAt,
+        error: job.error,
+        result: parsedResult,
+        reportId: null, // Can be added later if reportId field exists
+        batchJobId: job.batchJobId || null,
+        progress: job.progress ?? 0,
+        currentStep: job.currentStep ?? null,
+        logs: job.logs ? JSON.parse(job.logs) : null,
+      };
+    });
 
     // Calculate statistics
     const stats = {
@@ -216,9 +263,16 @@ export async function getJobById(jobId: string): Promise<QueueJob | null> {
       return null;
     }
 
+    const parsedResult = job.result ? JSON.parse(job.result) : null;
+    const { companyName, overallConclusion, currentPrice, currency } = extractJobSummary(parsedResult);
+
     return {
       id: job.id,
       ticker: job.ticker,
+      companyName,
+      overallConclusion,
+      currentPrice,
+      currency,
       query: job.query,
       status: job.status as JobStatus,
       createdAt: job.createdAt,
@@ -226,7 +280,7 @@ export async function getJobById(jobId: string): Promise<QueueJob | null> {
       startedAt: job.startedAt,
       completedAt: job.completedAt,
       error: job.error,
-      result: job.result ? JSON.parse(job.result) : null,
+      result: parsedResult,
       reportId: null,
       batchJobId: job.batchJobId || null,
       progress: job.progress ?? 0,
@@ -298,9 +352,16 @@ export async function updateJobStatus(
       data: updateData,
     });
 
+    const parsedResult = job.result ? JSON.parse(job.result) : null;
+    const { companyName, overallConclusion, currentPrice, currency } = extractJobSummary(parsedResult);
+
     return {
       id: job.id,
       ticker: job.ticker,
+      companyName,
+      overallConclusion,
+      currentPrice,
+      currency,
       query: job.query,
       status: job.status as JobStatus,
       createdAt: job.createdAt,
@@ -308,7 +369,7 @@ export async function updateJobStatus(
       startedAt: job.startedAt,
       completedAt: job.completedAt,
       error: job.error,
-      result: job.result ? JSON.parse(job.result) : null,
+      result: parsedResult,
       reportId: null,
       batchJobId: job.batchJobId || null,
       progress: job.progress ?? 0,
