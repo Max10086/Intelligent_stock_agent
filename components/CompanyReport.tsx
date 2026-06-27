@@ -2,13 +2,21 @@
 import React, { useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { CompanyAnalysis, Language, QnAResult } from '../types.ts';
+import { CompanyAnalysis, FollowUpBaseline, Language, QnAResult } from '../types.ts';
 import { getUIText } from '../constants.ts';
-import { ChevronDownIcon, LinkIcon, LightBulbIcon, DocumentTextIcon, ChartBarIcon, BriefcaseIcon, ScaleIcon, ShieldExclamationIcon, StarIcon, CurrencyDollarIcon } from './icons.tsx';
+import { formatFollowUpDate, formatPriceChangePct } from '../utils/followUpHelpers.ts';
+import type { ComparisonBaselineMode } from '../utils/analysisTimeline.ts';
+import { normalizeDisplayText, mergeBrokenEvidenceFragments } from '../utils/textNormalize.ts';
+import { THESIS_SECTION_KEYS } from '../utils/synthesizeConclusionPrompt.ts';
+import { ChevronDownIcon, LinkIcon, LightBulbIcon, DocumentTextIcon, ChartBarIcon, BriefcaseIcon, ScaleIcon, ShieldExclamationIcon, StarIcon, CurrencyDollarIcon, BrainCircuitIcon, CalendarDaysIcon } from './icons.tsx';
 
 interface CompanyReportProps {
   companyAnalysis: CompanyAnalysis;
   language: Language;
+  canFollowUp?: boolean;
+  onFollowUp?: () => void;
+  comparisonBaseline?: FollowUpBaseline | null;
+  comparisonMode?: ComparisonBaselineMode;
 }
 
 interface PeriodPoint {
@@ -189,39 +197,53 @@ const ConclusionSection: React.FC<{ title: string; data: { summary: string; evid
         [uiText.conclusion.BusinessModel]: LightBulbIcon,
         [uiText.conclusion.Financials]: ScaleIcon,
         [uiText.conclusion.OutlookRisks]: ShieldExclamationIcon,
+        [uiText.conclusion.MarketSentiment]: BrainCircuitIcon,
+        [uiText.conclusion.IndustryCycle]: CalendarDaysIcon,
     };
     const Icon = iconMap[title] || DocumentTextIcon;
 
+    const evidenceList = mergeBrokenEvidenceFragments(
+      Array.isArray(data?.evidence) ? data.evidence.map(e => String(e || '')) : []
+    );
     return (
         <div className="bg-gray-800/50 p-4 rounded-lg">
             <h4 className="text-lg font-semibold text-gray-100 flex items-center gap-2"><Icon className="w-5 h-5 text-blue-400" /> {title}</h4>
             <div className="mt-2 prose prose-invert prose-sm max-w-none text-gray-300">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{data.summary}</ReactMarkdown>
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{normalizeDisplayText(data.summary)}</ReactMarkdown>
             </div>
             <details className="mt-3 text-xs">
                 <summary className="cursor-pointer font-medium text-gray-400 hover:text-gray-200">{uiText.conclusion.evidence}</summary>
                 <ul className="mt-2 pl-5 list-disc space-y-1 text-gray-400">
-                    {data.evidence.map((e, i) => <li key={i}>{e}</li>)}
+                    {evidenceList.map((e, i) => <li key={i}>{normalizeDisplayText(e)}</li>)}
                 </ul>
             </details>
         </div>
     );
 };
 
-export const CompanyReport: React.FC<CompanyReportProps> = ({ companyAnalysis, language }) => {
+export const CompanyReport: React.FC<CompanyReportProps> = ({
+  companyAnalysis,
+  language,
+  canFollowUp = false,
+  onFollowUp,
+  comparisonBaseline = null,
+  comparisonMode = 'previous',
+}) => {
   const uiText = getUIText(language);
   const { profile, quickTake, status, qna, conclusion, finalConclusion } = companyAnalysis;
   const freshnessAudit = buildFreshnessAudit(qna);
   const yesLabel = language === 'cn' ? '是' : 'Yes';
   const noLabel = language === 'cn' ? '否' : 'No';
 
-  const conclusionSections = conclusion ? [
-    { title: uiText.conclusion.UpstreamSupplyChain, data: conclusion.UpstreamSupplyChain },
-    { title: uiText.conclusion.MarketPosition, data: conclusion.MarketPosition },
-    { title: uiText.conclusion.BusinessModel, data: conclusion.BusinessModel },
-    { title: uiText.conclusion.Financials, data: conclusion.Financials },
-    { title: uiText.conclusion.OutlookRisks, data: conclusion.OutlookRisks },
-  ] : [];
+  const conclusionSections = conclusion
+    ? THESIS_SECTION_KEYS.map(key => ({
+        title: uiText.conclusion[key],
+        data: conclusion[key],
+      }))
+    : [];
+  const finalBulletPoints = Array.isArray(finalConclusion?.bullet_points)
+    ? finalConclusion!.bullet_points
+    : [];
 
   const formatPrice = (priceStr: string) => {
     if (!priceStr) return 'N/A';
@@ -305,9 +327,68 @@ export const CompanyReport: React.FC<CompanyReportProps> = ({ companyAnalysis, l
 
   const displayCaps = getDisplayMarketCaps();
   const displayQuickTake = (quickTake || '').trim();
+  const priceChange = comparisonBaseline
+    ? formatPriceChangePct(comparisonBaseline.price, profile.currentPrice)
+    : null;
 
   return (
     <div className="space-y-8 fade-in">
+      {canFollowUp && onFollowUp && status === 'complete' && (
+        <div className="rounded-lg border border-amber-700/40 bg-amber-950/20 p-4 flex flex-wrap items-center justify-between gap-3">
+          <p className="text-sm text-amber-200">
+            {language === 'cn'
+              ? '股价与市场环境可能已变化，可基于上次报告发起跟进分析。'
+              : 'Price and market context may have changed. Start a follow-up from the prior report.'}
+          </p>
+          <button
+            onClick={onFollowUp}
+            className="px-4 py-2 rounded-md bg-amber-700 hover:bg-amber-600 text-white text-sm font-semibold"
+          >
+            {uiText.followUpCompany}
+          </button>
+        </div>
+      )}
+
+      {comparisonBaseline && (
+        <section className="rounded-lg border border-blue-800/40 bg-blue-950/10 p-4 text-sm">
+          <p className="text-blue-300 font-semibold">
+            {comparisonMode === 'previous' ? uiText.compareVsPrevious : uiText.compareVsInitial}
+          </p>
+          <p className="text-[11px] text-gray-500 mt-1">
+            {uiText.compareBaselineDate}: {formatFollowUpDate(comparisonBaseline.analysisDate, language)}
+          </p>
+          <div className="mt-2 grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+            <div>
+              <p className="text-gray-500">{uiText.followUpPriorPrice}</p>
+              <p className="text-gray-200">{comparisonBaseline.price}</p>
+            </div>
+            <div>
+              <p className="text-gray-500">{uiText.followUpCurrentPrice}</p>
+              <p className="text-gray-200">{profile.currentPrice}</p>
+            </div>
+            <div>
+              <p className="text-gray-500">{uiText.followUpPriceChange}</p>
+              <p
+                className={
+                  priceChange?.startsWith('+')
+                    ? 'text-green-400'
+                    : priceChange?.startsWith('-')
+                      ? 'text-red-400'
+                      : 'text-gray-300'
+                }
+              >
+                {priceChange || '—'}
+              </p>
+            </div>
+          </div>
+          {comparisonBaseline.overallConclusion && (
+            <p className="mt-2 text-xs text-gray-400 line-clamp-2">
+              {uiText.followUpPriorConclusion}: {comparisonBaseline.overallConclusion}
+            </p>
+          )}
+        </section>
+      )}
+
       <section className="bg-gray-800 p-6 rounded-lg shadow-lg">
         <h3 className="text-xl font-bold text-white mb-4">{uiText.companyProfile}</h3>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 text-sm">
@@ -364,26 +445,58 @@ export const CompanyReport: React.FC<CompanyReportProps> = ({ companyAnalysis, l
         </section>
       )}
 
-      {status === 'complete' && finalConclusion && (
+      {finalConclusion && (
         <section className="bg-gray-800 p-6 rounded-lg shadow-lg">
             <h3 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
                 <StarIcon className="w-6 h-6 text-amber-400" /> {uiText.finalConclusion}
             </h3>
-            <p className="mb-4 text-lg font-semibold text-blue-300">{finalConclusion.overall_conclusion}</p>
+            <p className="mb-4 text-lg font-semibold text-blue-300 whitespace-pre-line">{normalizeDisplayText(finalConclusion.overall_conclusion) || 'N/A'}</p>
+            {finalConclusion.vs_prior && (
+              <div className="mb-4 rounded-md bg-gray-900/50 p-3 text-sm space-y-2">
+                {finalConclusion.vs_prior.prior_overall_conclusion && (
+                  <p className="text-gray-400">
+                    {uiText.followUpPriorConclusion}:{' '}
+                    <span className="text-gray-200">{normalizeDisplayText(finalConclusion.vs_prior.prior_overall_conclusion)}</span>
+                  </p>
+                )}
+                {finalConclusion.vs_prior.rating_change && (
+                  <p className={
+                    finalConclusion.vs_prior.rating_change === 'upgrade'
+                      ? 'text-green-400'
+                      : finalConclusion.vs_prior.rating_change === 'downgrade'
+                        ? 'text-red-400'
+                        : 'text-gray-300'
+                  }>
+                    {finalConclusion.vs_prior.rating_change === 'upgrade'
+                      ? uiText.followUpRatingUpgrade
+                      : finalConclusion.vs_prior.rating_change === 'downgrade'
+                        ? uiText.followUpRatingDowngrade
+                        : uiText.followUpRatingMaintain}
+                  </p>
+                )}
+                {finalConclusion.vs_prior.change_summary && (
+                  <p className="text-gray-300">{normalizeDisplayText(finalConclusion.vs_prior.change_summary)}</p>
+                )}
+              </div>
+            )}
             <div className="space-y-4">
-                {finalConclusion.bullet_points.map((point, index) => (
+                {finalBulletPoints.map((point, index) => {
+                    const evidenceList = mergeBrokenEvidenceFragments(
+                      Array.isArray(point?.evidence) ? point.evidence.map(e => String(e || '')) : []
+                    );
+                    return (
                     <div key={index} className="border-l-4 border-blue-500 pl-4">
-                        <p className="font-semibold text-gray-100">{point.argument}</p>
+                        <p className="font-semibold text-gray-100">{normalizeDisplayText(point?.argument) || '-'}</p>
                         <ul className="mt-2 pl-5 list-disc space-y-1 text-gray-400 text-sm">
-                            {point.evidence.map((e, i) => <li key={i}>{e}</li>)}
+                            {evidenceList.map((e, i) => <li key={i}>{normalizeDisplayText(e)}</li>)}
                         </ul>
                     </div>
-                ))}
+                )})}
             </div>
         </section>
       )}
 
-      {status === 'complete' && conclusion && (
+      {conclusion && (
         <section>
           <h3 className="text-xl font-bold text-white mb-4">{uiText.investmentThesis}</h3>
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -409,6 +522,16 @@ export const CompanyReport: React.FC<CompanyReportProps> = ({ companyAnalysis, l
         <div className="text-center py-8">
           <div className="spinner w-8 h-8 mx-auto"></div>
           <p className="mt-2 text-gray-400">Fetching detailed analysis...</p>
+        </div>
+      )}
+
+      {status === 'complete' && qna.length > 0 && (!conclusion || !finalConclusion) && (
+        <div className="text-center py-6 bg-yellow-900/20 border border-yellow-600/50 rounded-lg mb-6">
+          <p className="text-yellow-300">
+            {language === 'cn'
+              ? '详细问答已完成，但投资论点或最终结论缺失。请使用上方「补全未完成部分」按钮继续。'
+              : 'Q&A is complete, but the investment thesis or final conclusion is missing. Use "Complete Missing Sections" above to resume.'}
+          </p>
         </div>
       )}
 

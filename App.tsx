@@ -1,35 +1,60 @@
 
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import { SearchComponent } from './components/SearchComponent.tsx';
 import { AnalysisComponent } from './components/AnalysisComponent.tsx';
 import { BatchQueuePage } from './components/BatchQueuePage.tsx';
+import { ModelSettingsPanel } from './components/ModelSettingsPanel.tsx';
+import { FollowUpConfirmModal } from './components/FollowUpConfirmModal.tsx';
+import { getFollowUpTargetsFromParent } from './utils/followUpHelpers.ts';
 import { useStockAgent } from './hooks/useStockAgent.ts';
 import { useBatchJobs } from './hooks/useBatchJobs.ts';
-import { Language } from './types.ts';
+import { AnalysisState, Language } from './types.ts';
 import { Header } from './components/Header.tsx';
 import { HistorySidebar } from './components/HistorySidebar.tsx';
+import { resolveRootReportForTicker } from './utils/analysisTimeline.ts';
+import { persistUiLanguage, readStoredUiLanguage } from './utils/uiLanguage.ts';
 
 type ViewMode = 'single' | 'batch';
+type ActiveModelSnapshot = {
+  analysis: string | null;
+  search: string | null;
+};
 
 const App: React.FC = () => {
-  const [language, setLanguage] = useState<Language>('en');
+  const [language, setLanguage] = useState<Language>(() => readStoredUiLanguage() ?? 'en');
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [currentView, setCurrentView] = useState<ViewMode>('single');
-  const [activeModel, setActiveModel] = useState<string | null>(null);
+  const [activeModels, setActiveModels] = useState<ActiveModelSnapshot>({ analysis: null, search: null });
+  const [followUpModal, setFollowUpModal] = useState<{
+    parentState: AnalysisState;
+    companyIds?: string[];
+  } | null>(null);
+  const [viewingBaselineReport, setViewingBaselineReport] = useState<AnalysisState | null>(null);
   const {
     analysisState,
     history,
     isLoadingHistory,
+    historyError,
     saveStatus,
     saveMessage,
     startAnalysis,
+    startFollowUpAnalysis,
     resetAnalysis,
     loadFromHistory,
     deleteFromHistory,
     clearHistory,
     dismissSaveNotice,
+    retryLastAnalysis,
+    refreshHistory,
+    runtimeModelConfig,
+    reloadRuntimeModelConfig,
   } = useStockAgent();
   const { activeBatchJobId, batchJobStatus, isPolling, submitBatchJob, clearBatchJob } = useBatchJobs();
+
+  const handleLanguageChange = useCallback((lang: Language) => {
+    setLanguage(lang);
+    persistUiLanguage(lang);
+  }, []);
 
   useEffect(() => {
     const fetchActiveModel = async () => {
@@ -37,16 +62,28 @@ const App: React.FC = () => {
         const response = await fetch('/api/model');
         if (!response.ok) return;
         const data = await response.json();
-        if (typeof data.model === 'string' && data.model.trim()) {
-          setActiveModel(data.model.trim());
-        }
+        const analysis =
+          (typeof data?.analysis?.provider === 'string' &&
+          typeof data?.analysis?.model === 'string' &&
+          data.analysis.provider.trim() &&
+          data.analysis.model.trim())
+            ? `${data.analysis.provider.trim()}:${data.analysis.model.trim()}`
+            : (typeof data?.model === 'string' && data.model.trim() ? data.model.trim() : null);
+        const search =
+          (typeof data?.search?.provider === 'string' &&
+          typeof data?.search?.model === 'string' &&
+          data.search.provider.trim() &&
+          data.search.model.trim())
+            ? `${data.search.provider.trim()}:${data.search.model.trim()}`
+            : null;
+        setActiveModels({ analysis, search });
       } catch {
         // Keep UI quiet if backend model endpoint is temporarily unavailable.
       }
     };
 
     fetchActiveModel();
-  }, []);
+  }, [runtimeModelConfig.analysis.model, runtimeModelConfig.analysis.provider, runtimeModelConfig.search.model]);
 
   const handleSearch = useCallback((query: string) => {
     if (query.trim()) {
@@ -67,6 +104,8 @@ const App: React.FC = () => {
     resetAnalysis();
     clearBatchJob();
     setCurrentView('single');
+    setViewingBaselineReport(null);
+    setFollowUpModal(null);
   }, [resetAnalysis, clearBatchJob]);
 
   const handleViewChange = useCallback((view: ViewMode) => {
@@ -74,12 +113,85 @@ const App: React.FC = () => {
   }, []);
 
   const handleLoadFromHistory = useCallback((id: string) => {
-    loadFromHistory(id);
+    void loadFromHistory(id).catch(error => {
+      console.error('Failed to load history report:', error);
+      alert(
+        language === 'cn'
+          ? `加载报告失败：${error instanceof Error ? error.message : '未知错误'}`
+          : `Failed to load report: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    });
+    setViewingBaselineReport(null);
     setIsHistoryOpen(false);
-  }, [loadFromHistory]);
+  }, [loadFromHistory, language]);
+
+  const openFollowUpModal = useCallback((parentState: AnalysisState, companyIds?: string[]) => {
+    setFollowUpModal({ parentState, companyIds });
+    setIsHistoryOpen(false);
+  }, []);
+
+  const handleFollowUpAllFromHistory = useCallback((id: string) => {
+    const parentState = history.find(item => item.id === id);
+    if (parentState) {
+      openFollowUpModal(parentState);
+    }
+  }, [history, openFollowUpModal]);
+
+  const handleFollowUpCompany = useCallback((companyId: string) => {
+    openFollowUpModal(analysisState, [companyId]);
+  }, [analysisState, openFollowUpModal]);
+
+  const handleConfirmFollowUp = useCallback(() => {
+    if (!followUpModal) return;
+    const { parentState, companyIds } = followUpModal;
+    setFollowUpModal(null);
+    setViewingBaselineReport(null);
+    void startFollowUpAnalysis(parentState, { companyIds });
+  }, [followUpModal, startFollowUpAnalysis]);
+
+  const followUpTargetCompanies = useMemo(() => {
+    if (!followUpModal) return [];
+    return getFollowUpTargetsFromParent(followUpModal.parentState, followUpModal.companyIds);
+  }, [followUpModal]);
+
+  const parentReportForView = useMemo(() => {
+    if (!analysisState.followUpMeta?.parentAnalysisId) return null;
+    return history.find(item => item.id === analysisState.followUpMeta?.parentAnalysisId) || null;
+  }, [analysisState.followUpMeta?.parentAnalysisId, history]);
+
+  const initialReportForView = useMemo(() => {
+    if (analysisState.analysisType !== 'follow_up') return null;
+    const ticker =
+      analysisState.focusCompany?.profile.ticker ||
+      analysisState.candidateCompanies[0]?.profile.ticker;
+    if (!ticker) return null;
+    const historyById = new Map(history.map(item => [item.id, item]));
+    const root = resolveRootReportForTicker(analysisState, ticker, historyById);
+    return root.id !== analysisState.id ? root : null;
+  }, [analysisState, history]);
+
+  const handleViewParentReport = useCallback(() => {
+    if (parentReportForView) {
+      setViewingBaselineReport(parentReportForView);
+    }
+  }, [parentReportForView]);
+
+  const handleViewInitialReport = useCallback(() => {
+    if (initialReportForView) {
+      setViewingBaselineReport(initialReportForView);
+    }
+  }, [initialReportForView]);
+
+  const displayedAnalysisState = viewingBaselineReport || analysisState;
+  const activeReportId = viewingBaselineReport?.id || analysisState.id;
 
   // Show batch job status if active
   const showBatchStatus = activeBatchJobId && batchJobStatus;
+
+  /** Main search entry (single view, idle) — input form is the only start action. */
+  const isSearchHome =
+    currentView === 'single' && analysisState.status === 'idle' && !showBatchStatus;
+  const showNewAnalysisButton = !isSearchHome;
 
   return (
     <div className="min-h-screen bg-gray-900 text-gray-100 font-sans">
@@ -88,14 +200,34 @@ const App: React.FC = () => {
         onClose={() => setIsHistoryOpen(false)}
         history={history}
         isLoading={isLoadingHistory}
+        historyError={historyError}
+        onRefreshHistory={() => void refreshHistory()}
         onLoad={handleLoadFromHistory}
+        onFollowUpAll={handleFollowUpAllFromHistory}
         onDelete={deleteFromHistory}
         onClearAll={clearHistory}
-        currentLanguage={analysisState.language}
+        currentLanguage={language}
+        activeReportId={activeReportId}
       />
-      <Header 
-        onReset={handleReset} 
-        onToggleHistory={() => setIsHistoryOpen(true)}
+      <FollowUpConfirmModal
+        isOpen={Boolean(followUpModal)}
+        parentState={followUpModal?.parentState || null}
+        targetCompanies={followUpTargetCompanies}
+        language={language}
+        onClose={() => setFollowUpModal(null)}
+        onConfirm={handleConfirmFollowUp}
+      />
+      <Header
+        onReset={handleReset}
+        onToggleHistory={() => {
+          setIsHistoryOpen(true);
+          if (historyError) {
+            void refreshHistory();
+          }
+        }}
+        language={language}
+        onLanguageChange={handleLanguageChange}
+        showNewAnalysisButton={showNewAnalysisButton}
         currentView={currentView}
         onViewChange={handleViewChange}
       />
@@ -117,8 +249,13 @@ const App: React.FC = () => {
             </button>
           </div>
         )}
+        <ModelSettingsPanel
+          language={language}
+          runtimeModelConfig={runtimeModelConfig}
+          onConfigReload={reloadRuntimeModelConfig}
+        />
         {currentView === 'batch' ? (
-          <BatchQueuePage language={language} setLanguage={setLanguage} />
+          <BatchQueuePage language={language} />
         ) : (
           <>
             {showBatchStatus ? (
@@ -190,22 +327,50 @@ const App: React.FC = () => {
               </div>
             ) : null}
             {analysisState.status === 'idle' && !showBatchStatus ? (
-              <SearchComponent
-                onSearch={handleSearch}
-
-                language={language}
-                setLanguage={setLanguage}
-              />
+              <SearchComponent onSearch={handleSearch} language={language} />
             ) : !showBatchStatus ? (
-              <AnalysisComponent analysisState={analysisState} language={analysisState.language} />
+              <>
+                {viewingBaselineReport && (
+                  <div className="max-w-4xl mx-auto mb-4 rounded-lg border border-gray-600 bg-gray-800/80 px-4 py-3 flex items-center justify-between">
+                    <p className="text-sm text-gray-300">
+                      {viewingBaselineReport.id === initialReportForView?.id
+                        ? (language === 'cn' ? '正在查看首次分析（只读）' : 'Viewing initial report (read-only)')
+                        : (language === 'cn' ? '正在查看上一份报告（只读）' : 'Viewing previous report (read-only)')}
+                    </p>
+                    <button
+                      onClick={() => setViewingBaselineReport(null)}
+                      className="text-xs font-medium px-3 py-1.5 rounded-md bg-blue-600 hover:bg-blue-500 text-white"
+                    >
+                      {language === 'cn' ? '返回当前报告' : 'Back to current report'}
+                    </button>
+                  </div>
+                )}
+                <AnalysisComponent
+                  analysisState={displayedAnalysisState}
+                  language={language}
+                  history={history}
+                  onRetry={viewingBaselineReport ? undefined : retryLastAnalysis}
+                  onFollowUpCompany={viewingBaselineReport ? undefined : handleFollowUpCompany}
+                  onViewParentReport={handleViewParentReport}
+                  onViewInitialReport={handleViewInitialReport}
+                  onLoadReport={handleLoadFromHistory}
+                  parentReportAvailable={Boolean(parentReportForView)}
+                  initialReportAvailable={Boolean(initialReportForView)}
+                />
+              </>
             ) : null}
           </>
         )}
       </main>
       <footer className="text-center py-4 text-gray-500 text-sm">
-        {activeModel && (
+        {activeModels.analysis && (
           <p className="mb-1 text-xs text-gray-400">
-            {language === 'cn' ? '当前模型' : 'Active Model'}: <span className="font-semibold text-gray-300">{activeModel}</span>
+            {language === 'cn' ? '当前分析模型' : 'Active Analysis'}: <span className="font-semibold text-gray-300">{activeModels.analysis}</span>
+          </p>
+        )}
+        {activeModels.search && (
+          <p className="mb-1 text-xs text-gray-400">
+            {language === 'cn' ? '当前搜索模型' : 'Active Search'}: <span className="font-semibold text-gray-300">{activeModels.search}</span>
           </p>
         )}
         <p>Intelligent Stock Agent. For informational purposes only. Not financial advice.</p>

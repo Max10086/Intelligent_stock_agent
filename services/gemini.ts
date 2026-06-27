@@ -2,6 +2,9 @@
 // Backend API client for Vertex AI
 // This client calls the backend proxy server which uses Application Default Credentials
 
+import { QUESTION_GENERATION_BATCH_TIMEOUT_MS } from '../utils/questionGenerationBatches.ts';
+import { ANSWER_QUESTION_TIMEOUT_MS } from '../utils/parallelTasks.ts';
+
 // In development, Vite proxy handles /api requests
 // In production, use VITE_API_BASE_URL environment variable or default to relative path
 const API_BASE_URL = 
@@ -32,6 +35,15 @@ interface GenerateContentResponse {
       };
     }>;
   };
+  usage?: {
+    promptTokens?: number;
+    completionTokens?: number;
+    reasoningTokens?: number;
+    totalTokens?: number;
+    estimatedCostUsd?: number;
+  };
+  provider?: 'vertex' | 'deepseek' | 'doubao';
+  model?: string;
 }
 
 // Create a proxy object that mimics GoogleGenAI interface
@@ -39,29 +51,61 @@ class VertexAIClient {
   models = {
     generateContent: async (params: {
       model?: string;
+      provider?: 'vertex' | 'deepseek' | 'doubao';
+      step?: string;
+      requireGoogleSearch?: boolean;
       contents: any;
       config?: any;
     }): Promise<GenerateContentResponse> => {
+      const timeoutMs =
+        params.step === 'question_generation' || params.step === 'follow_up_question_generation'
+          ? QUESTION_GENERATION_BATCH_TIMEOUT_MS
+          : params.step === 'answer_question' || params.step === 'follow_up_answer_question'
+            ? ANSWER_QUESTION_TIMEOUT_MS
+            : params.step === 'synthesize_conclusion_section' ||
+                params.step === 'follow_up_synthesize_conclusion_section' ||
+                params.step === 'final_conclusion' ||
+                params.step === 'follow_up_final_conclusion'
+              ? 240_000
+              : 180_000;
+
       try {
         const requestBody = JSON.stringify({
           ...(params.model ? { model: params.model } : {}),
+          ...(params.provider ? { provider: params.provider } : {}),
+          ...(params.step ? { step: params.step } : {}),
+          ...(params.requireGoogleSearch ? { requireGoogleSearch: true } : {}),
           contents: params.contents,
           config: params.config,
         });
 
-        const callBackend = async () =>
-          fetch(`${API_BASE_URL}/api/vertex-ai/generate-content`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: requestBody,
-          });
+        const callBackend = async () => {
+          const controller = new AbortController();
+          const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+          try {
+            return await fetch(`${API_BASE_URL}/api/vertex-ai/generate-content`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+              },
+              body: requestBody,
+              signal: controller.signal,
+            });
+          } finally {
+            window.clearTimeout(timeoutId);
+          }
+        };
 
         let response: Response;
         try {
           response = await callBackend();
         } catch (firstError) {
+          const isAbort =
+            firstError instanceof Error &&
+            (firstError.name === 'AbortError' || firstError.message.includes('aborted'));
+          if (isAbort) {
+            throw firstError;
+          }
           // Retry once for transient proxy/startup race.
           await new Promise(resolve => setTimeout(resolve, 300));
           response = await callBackend();
@@ -92,11 +136,19 @@ class VertexAIClient {
             groundingMetadata: data.groundingMetadata,
           }],
           groundingMetadata: data.groundingMetadata,
+          usage: data.usage,
+          provider: data.provider,
+          model: data.model,
         };
       } catch (error) {
         console.error('Error calling Vertex AI backend:', error);
         if (error instanceof Error) {
           // Check if it's a network error
+          if (error.name === 'AbortError' || error.message.includes('aborted')) {
+            throw new Error(
+              `LLM request timed out after ${Math.round(timeoutMs / 1000)}s (${params.step || 'unknown step'}). Retry or switch model.`
+            );
+          }
           if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError')) {
             throw new Error(
               'Failed to connect to backend server. ' +

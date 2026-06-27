@@ -14,6 +14,8 @@ export interface QueueJob {
   overallConclusion?: string | null;
   currentPrice?: string | null;
   currency?: string | null;
+  estimatedCostUsd?: number | null;
+  totalTokens?: number | null;
   query: string;
   status: JobStatus;
   createdAt: Date;
@@ -34,9 +36,18 @@ function extractJobSummary(result: any): {
   overallConclusion: string | null;
   currentPrice: string | null;
   currency: string | null;
+  estimatedCostUsd: number | null;
+  totalTokens: number | null;
 } {
   if (!result || typeof result !== 'object') {
-    return { companyName: null, overallConclusion: null, currentPrice: null, currency: null };
+    return {
+      companyName: null,
+      overallConclusion: null,
+      currentPrice: null,
+      currency: null,
+      estimatedCostUsd: null,
+      totalTokens: null,
+    };
   }
 
   const focusCompany = (result as any).focusCompany;
@@ -50,8 +61,27 @@ function extractJobSummary(result: any): {
     typeof focusCompany?.profile?.currentPrice === 'string' ? focusCompany.profile.currentPrice : null;
   const currency =
     typeof focusCompany?.profile?.currency === 'string' ? focusCompany.profile.currency : null;
+  const telemetry = Array.isArray((result as any).llmTelemetry) ? (result as any).llmTelemetry : [];
+  let estimatedCostUsd = 0;
+  let totalTokens = 0;
+  for (const entry of telemetry) {
+    const usage = entry?.usage;
+    if (usage && typeof usage.estimatedCostUsd === 'number' && Number.isFinite(usage.estimatedCostUsd)) {
+      estimatedCostUsd += usage.estimatedCostUsd;
+    }
+    if (usage && typeof usage.totalTokens === 'number' && Number.isFinite(usage.totalTokens)) {
+      totalTokens += usage.totalTokens;
+    }
+  }
 
-  return { companyName, overallConclusion, currentPrice, currency };
+  return {
+    companyName,
+    overallConclusion,
+    currentPrice,
+    currency,
+    estimatedCostUsd: telemetry.length ? estimatedCostUsd : null,
+    totalTokens: telemetry.length ? totalTokens : null,
+  };
 }
 
 export interface QueueStatus {
@@ -111,7 +141,7 @@ export async function addToQueue(
     // Transform to QueueJob format
     const queueJobs: QueueJob[] = jobs.map(job => {
       const parsedResult = job.result ? JSON.parse(job.result) : null;
-      const { companyName, overallConclusion, currentPrice, currency } = extractJobSummary(parsedResult);
+      const { companyName, overallConclusion, currentPrice, currency, estimatedCostUsd, totalTokens } = extractJobSummary(parsedResult);
 
       return {
         id: job.id,
@@ -120,6 +150,8 @@ export async function addToQueue(
         overallConclusion,
         currentPrice,
         currency,
+        estimatedCostUsd,
+        totalTokens,
         query: job.query,
         status: job.status as JobStatus,
         createdAt: job.createdAt,
@@ -195,7 +227,7 @@ export async function getQueueStatus(options?: {
     // Transform to QueueJob format
     const queueJobs: QueueJob[] = jobs.map(job => {
       const parsedResult = job.result ? JSON.parse(job.result) : null;
-      const { companyName, overallConclusion, currentPrice, currency } = extractJobSummary(parsedResult);
+      const { companyName, overallConclusion, currentPrice, currency, estimatedCostUsd, totalTokens } = extractJobSummary(parsedResult);
 
       return {
         id: job.id,
@@ -204,6 +236,8 @@ export async function getQueueStatus(options?: {
         overallConclusion,
         currentPrice,
         currency,
+        estimatedCostUsd,
+        totalTokens,
         query: job.query,
         status: job.status as JobStatus,
         createdAt: job.createdAt,
@@ -264,7 +298,7 @@ export async function getJobById(jobId: string): Promise<QueueJob | null> {
     }
 
     const parsedResult = job.result ? JSON.parse(job.result) : null;
-    const { companyName, overallConclusion, currentPrice, currency } = extractJobSummary(parsedResult);
+    const { companyName, overallConclusion, currentPrice, currency, estimatedCostUsd, totalTokens } = extractJobSummary(parsedResult);
 
     return {
       id: job.id,
@@ -273,6 +307,8 @@ export async function getJobById(jobId: string): Promise<QueueJob | null> {
       overallConclusion,
       currentPrice,
       currency,
+      estimatedCostUsd,
+      totalTokens,
       query: job.query,
       status: job.status as JobStatus,
       createdAt: job.createdAt,
@@ -353,7 +389,7 @@ export async function updateJobStatus(
     });
 
     const parsedResult = job.result ? JSON.parse(job.result) : null;
-    const { companyName, overallConclusion, currentPrice, currency } = extractJobSummary(parsedResult);
+    const { companyName, overallConclusion, currentPrice, currency, estimatedCostUsd, totalTokens } = extractJobSummary(parsedResult);
 
     return {
       id: job.id,
@@ -362,6 +398,8 @@ export async function updateJobStatus(
       overallConclusion,
       currentPrice,
       currency,
+      estimatedCostUsd,
+      totalTokens,
       query: job.query,
       status: job.status as JobStatus,
       createdAt: job.createdAt,

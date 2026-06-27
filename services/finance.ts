@@ -155,7 +155,9 @@ const searchTickerByTencentSmartbox = async (query: string): Promise<Pick<Compan
         const secType = (parts[4] || '').toUpperCase();
         const exchange = smartboxPrefixToExchange(marketPrefix);
         if (exchange === 'UNKNOWN') continue;
-        if (secType !== 'GP') continue; // skip options/warrants/structured products
+        // Keep common equity variants:
+        // GP (stock), GP-A / GP-B (A/B shares in CN markets).
+        if (!secType.startsWith('GP')) continue; // skip options/warrants/structured products
 
         const ticker = rawCode.split('.')[0].toUpperCase();
         if (!ticker || ticker.includes('-') || ticker.includes('=')) continue;
@@ -265,10 +267,39 @@ const parseCurrencyField = (raw: string): string | undefined => {
 
 const get52WeekBounds = (parts: string[], exchange: string) => {
     const upperExchange = exchange.toUpperCase();
-    const highIndex = ['SSE', 'SZSE', 'SH', 'SZ'].includes(upperExchange) ? 47 : 48;
-    const lowIndex = ['SSE', 'SZSE', 'SH', 'SZ'].includes(upperExchange) ? 48 : 49;
-    const high = parseFinite(parts[highIndex] || '');
-    const low = parseFinite(parts[lowIndex] || '');
+    const isCn = ['SSE', 'SZSE', 'SH', 'SZ'].includes(upperExchange);
+
+    if (isCn) {
+        // A-shares: verified against Tencent 260-day K-line — true 52w range is at [67]/[68].
+        // [47]/[48] are unreliable (often a shorter window or stale values).
+        let high = parseFinite(parts[67] || '');
+        let low = parseFinite(parts[68] || '');
+
+        if (high === null || low === null || high <= 0 || low <= 0 || high < low) {
+            high = parseFinite(parts[47] || '');
+            low = parseFinite(parts[48] || '');
+        }
+
+        // Some high-volatility symbols (e.g. sh603256) store an earlier 52w low at [66].
+        const extraLow = parseFinite(parts[66] || '');
+        if (
+            low !== null &&
+            extraLow !== null &&
+            extraLow > 0 &&
+            extraLow < low &&
+            extraLow >= low * 0.15
+        ) {
+            low = extraLow;
+        }
+
+        return {
+            high52w: high !== null ? high.toFixed(2) : '',
+            low52w: low !== null ? low.toFixed(2) : '',
+        };
+    }
+
+    const high = parseFinite(parts[48] || '');
+    const low = parseFinite(parts[49] || '');
     return {
         high52w: high !== null ? high.toFixed(2) : '',
         low52w: low !== null ? low.toFixed(2) : '',

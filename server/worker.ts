@@ -7,6 +7,7 @@
 
 // 引入新增加的 resetStalledJobs
 import { startQueueProcessing, resetStalledJobs } from './actions/process.js';
+import { prisma, withPrismaRetry } from './db.js';
 
 let workerInterval: NodeJS.Timeout | null = null;
 
@@ -35,17 +36,18 @@ export async function startQueueWorker(): Promise<void> {
     // 3. Watchdog: only re-trigger when there may be pending batch work
     workerInterval = setInterval(async () => {
       try {
-        const { prisma } = await import('./db.js');
-        const pendingCount = await prisma.analysisJob.count({
-          where: { status: 'PENDING' },
-        });
+        const pendingCount = await withPrismaRetry(
+          () => prisma.analysisJob.count({ where: { status: 'PENDING' } }),
+          'worker.pendingCount',
+          2
+        );
         if (pendingCount > 0) {
           startQueueProcessing();
         }
       } catch {
         // Avoid spamming logs when DB is temporarily unavailable
       }
-    }, 30000);
+    }, 60000);
 
   } catch (error) {
     console.error('❌ Failed to start queue worker:', error);

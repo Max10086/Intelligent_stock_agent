@@ -1,5 +1,7 @@
 
 export type Language = 'en' | 'cn';
+export type ModelProvider = 'vertex' | 'deepseek';
+export type SearchProvider = 'vertex' | 'doubao';
 
 export interface CompanyProfile {
   name: string;
@@ -46,11 +48,15 @@ export interface ConclusionSectionData {
 }
 
 export interface InvestmentConclusion {
+  investment_narrative?: string;
+  cross_dimensional_insights?: string[];
   UpstreamSupplyChain: ConclusionSectionData;
   MarketPosition: ConclusionSectionData;
   BusinessModel: ConclusionSectionData;
   Financials: ConclusionSectionData;
   OutlookRisks: ConclusionSectionData;
+  MarketSentiment: ConclusionSectionData;
+  IndustryCycle: ConclusionSectionData;
 }
 
 export interface FinalConclusionPoint {
@@ -58,9 +64,38 @@ export interface FinalConclusionPoint {
   evidence: string[];
 }
 
+export type RatingChange = 'upgrade' | 'maintain' | 'downgrade' | 'unknown';
+
+export interface FinalConclusionVsPrior {
+  prior_overall_conclusion?: string;
+  rating_change?: RatingChange;
+  change_summary?: string;
+}
+
 export interface FinalConclusion {
   overall_conclusion: string;
   bullet_points: FinalConclusionPoint[];
+  vs_prior?: FinalConclusionVsPrior;
+}
+
+export interface FollowUpBaseline {
+  analysisDate: string;
+  ticker: string;
+  name: string;
+  price: string;
+  peTtm?: string;
+  marketCap?: string;
+  overallConclusion?: string;
+  thesisBullets?: string[];
+}
+
+export type AnalysisType = 'initial' | 'follow_up';
+
+export interface FollowUpMeta {
+  parentAnalysisId: string;
+  parentTimestamp: string;
+  parentQuery: string;
+  baselines: Record<string, FollowUpBaseline>;
 }
 
 export interface CompanyAnalysis {
@@ -73,6 +108,7 @@ export interface CompanyAnalysis {
   conclusion: InvestmentConclusion | null;
   finalConclusion: FinalConclusion | null;
   followUpQuestions: string[];
+  priorBaseline?: FollowUpBaseline;
   error?: string | null;
 }
 
@@ -87,4 +123,32 @@ export interface AnalysisState {
   error: string | null;
   currentStage: string;
   currentProgress: number;
+  llmTelemetry?: LlmTelemetryEntry[];
+  analysisType?: AnalysisType;
+  followUpMeta?: FollowUpMeta;
+  /** Client-side session id (AnalysisState.id before DB job id overwrite); used to dedupe duplicate saves. */
+  clientSessionId?: string;
+}
+
+export interface LlmTelemetryEntry {
+  step: string;
+  provider: 'vertex' | 'deepseek' | 'doubao';
+  model: string;
+  startedAt: string;
+  durationMs: number;
+  usage?: {
+    promptTokens?: number;
+    completionTokens?: number;
+    reasoningTokens?: number;
+    totalTokens?: number;
+    estimatedCostUsd?: number;
+  };
+}
+
+export interface RuntimeModelConfig {
+  analysis: { provider: ModelProvider; model: string };
+  search: { provider: SearchProvider; model: string };
+  questions: { focus: number; candidate: number };
+  /** DeepSeek thinking for answer_question_synthesis (detailed Q&A prose). */
+  qna: { thinkingEnabled: boolean };
 }

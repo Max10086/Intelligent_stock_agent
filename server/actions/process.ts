@@ -1,8 +1,8 @@
 import { prisma } from '../db.js';
-import { JobStatus } from '@prisma/client';
 import { GoogleGenAI } from '@google/genai';
 import { AnalysisState } from '../../types.js';
 import { AnalysisService } from '../services/analysis.js';
+import { LlmCallTelemetry, ModelClient } from '../services/modelClient.js';
 import { updateJobStatus } from './queue.js';
 
 // --- Configuration ---
@@ -67,8 +67,10 @@ export async function runDeepResearch(
   jobId?: string,
   onProgress?: (message: string) => void | Promise<void>
 ): Promise<AnalysisState> {
-  const ai = getAIClient();
-  const analysisService = new AnalysisService(ai);
+  const telemetry: LlmCallTelemetry[] = [];
+  const analysisService = new AnalysisService(
+    new ModelClient(getAIClient(), entry => telemetry.push(entry))
+  );
   
   const progressCallback = async (progress: number, step: string, log?: string) => {
     const message = log || step;
@@ -76,7 +78,11 @@ export async function runDeepResearch(
     if (onProgress) await onProgress(message);
   };
 
-  return await analysisService.runFullAnalysis(query, language as 'en' | 'cn', progressCallback);
+  const result = await analysisService.runFullAnalysis(query, language as 'en' | 'cn', progressCallback);
+  return {
+    ...result,
+    llmTelemetry: telemetry,
+  };
 }
 
 /**

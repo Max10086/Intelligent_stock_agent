@@ -5,7 +5,6 @@ import { useBatchJobs } from '../hooks/useBatchJobs.ts';
 
 interface BatchQueuePageProps {
   language: Language;
-  setLanguage: (lang: Language) => void;
 }
 
 interface QueueJob {
@@ -15,6 +14,8 @@ interface QueueJob {
   overallConclusion?: string | null;
   currentPrice?: string | null;
   currency?: string | null;
+  estimatedCostUsd?: number | null;
+  totalTokens?: number | null;
   status: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
   createdAt: string;
   completedAt: string | null;
@@ -37,7 +38,7 @@ interface QueueStatus {
 
 const API_BASE_URL = typeof window !== 'undefined' ? '' : 'http://localhost:3001';
 
-export const BatchQueuePage: React.FC<BatchQueuePageProps> = ({ language, setLanguage }) => {
+export const BatchQueuePage: React.FC<BatchQueuePageProps> = ({ language }) => {
   const [tickersInput, setTickersInput] = useState('');
   const [queueStatus, setQueueStatus] = useState<QueueStatus | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -62,6 +63,9 @@ export const BatchQueuePage: React.FC<BatchQueuePageProps> = ({ language, setLan
         overallConclusion: job.overallConclusion ?? null,
         currentPrice: job.currentPrice ?? null,
         currency: job.currency ?? null,
+        estimatedCostUsd:
+          typeof job.estimatedCostUsd === 'number' ? job.estimatedCostUsd : null,
+        totalTokens: typeof job.totalTokens === 'number' ? job.totalTokens : null,
         status: job.status as 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED',
         createdAt: job.createdAt,
         completedAt: job.completedAt || null,
@@ -278,6 +282,16 @@ export const BatchQueuePage: React.FC<BatchQueuePageProps> = ({ language, setLan
     };
   };
 
+  const formatEstimatedCost = (job: QueueJob) => {
+    if (typeof job.estimatedCostUsd !== 'number' || !Number.isFinite(job.estimatedCostUsd)) {
+      return '-';
+    }
+    if (job.estimatedCostUsd < 0.0001) {
+      return '<$0.0001';
+    }
+    return `$${job.estimatedCostUsd.toFixed(4)}`;
+  };
+
   // Load report (set analysis state from result)
   const handleLoadReport = useCallback((job: QueueJob) => {
     if (job.result) {
@@ -321,7 +335,7 @@ export const BatchQueuePage: React.FC<BatchQueuePageProps> = ({ language, setLan
           {error && (
             <div className="mt-2 text-red-400 text-sm">{error}</div>
           )}
-          <div className="mt-4 flex justify-between items-center">
+          <div className="mt-4">
             <button
               type="submit"
               disabled={isSubmitting || !tickersInput.trim()}
@@ -331,13 +345,6 @@ export const BatchQueuePage: React.FC<BatchQueuePageProps> = ({ language, setLan
                 ? (language === 'en' ? 'Submitting...' : '提交中...')
                 : (language === 'en' ? 'Start Batch Analysis' : '开始批量分析')
               }
-            </button>
-            <button
-              type="button"
-              onClick={() => setLanguage(language === 'en' ? 'cn' : 'en')}
-              className="px-4 py-2 text-sm font-medium text-gray-300 bg-gray-700 rounded-md hover:bg-gray-600 transition-colors"
-            >
-              {language === 'en' ? '中文' : 'English'}
             </button>
           </div>
         </form>
@@ -376,10 +383,11 @@ export const BatchQueuePage: React.FC<BatchQueuePageProps> = ({ language, setLan
                 <col className="w-[8%]" />
                 <col className="w-[14%]" />
                 <col className="w-[10%]" />
-                <col className="w-[15%]" />
-                <col className="w-[16%]" />
+                <col className="w-[9%]" />
                 <col className="w-[13%]" />
-                <col className="w-[13%]" />
+                <col className="w-[11%]" />
+                <col className="w-[12%]" />
+                <col className="w-[12%]" />
                 <col className="w-[11%]" />
               </colgroup>
               <thead>
@@ -398,6 +406,9 @@ export const BatchQueuePage: React.FC<BatchQueuePageProps> = ({ language, setLan
                   </th>
                   <th className="text-left py-3 px-2 text-gray-400 font-semibold">
                     {language === 'en' ? 'Status & Progress' : '状态与进度'}
+                  </th>
+                  <th className="text-left py-3 px-2 text-gray-400 font-semibold">
+                    {language === 'en' ? 'Est. Cost' : '估算成本'}
                   </th>
                   <th className="text-left py-3 px-2 text-gray-400 font-semibold">
                     {language === 'en' ? 'Created' : '创建时间'}
@@ -487,6 +498,12 @@ export const BatchQueuePage: React.FC<BatchQueuePageProps> = ({ language, setLan
                           </div>
                         )}
                       </div>
+                    </td>
+                    <td className="py-3 px-2 text-gray-300 text-sm whitespace-nowrap" title={formatEstimatedCost(job)}>
+                      <div>{formatEstimatedCost(job)}</div>
+                      {typeof job.totalTokens === 'number' && Number.isFinite(job.totalTokens) ? (
+                        <div className="text-[11px] text-gray-500">{job.totalTokens.toLocaleString()} tok</div>
+                      ) : null}
                     </td>
                     <td className="py-3 px-2 text-gray-400 text-sm truncate" title={formatDateTime(job.createdAt)}>
                       {formatDateTime(job.createdAt)}

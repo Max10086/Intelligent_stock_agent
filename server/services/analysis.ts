@@ -1,4 +1,3 @@
-import { GoogleGenAI } from '@google/genai';
 import { Type } from '@google/genai';
 import {
   AnalysisState,
@@ -10,46 +9,147 @@ import {
   InvestmentConclusion,
   FinalConclusion,
 } from '../../types.js';
-import { ANALYSIS_MODEL } from '../aiModelConfig.js';
+import { getRuntimeModelConfig } from '../aiModelConfig.js';
+import { ModelClient } from './modelClient.js';
+import { cleanupBrokenNumericFormatting, mergeBrokenEvidenceFragments } from '../../utils/textNormalize.js';
+import { buildFinalConclusionPrompt, buildFinalConclusionStrictRetrySuffix } from '../../utils/finalConclusionPrompt.js';
+import { normalizeInvestmentConclusion } from '../../utils/investmentConclusionNormalize.js';
+import { parseModelJsonResponse } from '../../utils/modelJson.js';
+import {
+  hasUsableInvestmentConclusion,
+  THESIS_SECTION_KEYS,
+} from '../../utils/synthesizeConclusionPrompt.js';
+import { synthesizeInvestmentConclusionBySections } from '../../utils/synthesizeConclusionOrchestrator.js';
+import type { ThesisSectionKey } from '../../utils/synthesizeConclusionPrompt.js';
+import { QNA_CONCURRENCY, runParallelIndexedTasks } from '../../utils/parallelTasks.js';
+import { indexAnsweredQuestions, orderQnaByQuestions } from '../../utils/qnaHelpers.js';
+import { buildGenerateQuestionsPrompt } from '../../utils/questionGenerationPrompt.js';
+import { generateQuestionsInBatches } from '../../utils/questionGenerationBatches.js';
+import { buildRecencyGuidance } from '../../utils/recencyGuidance.js';
+import { pickLanguageValidQuestions } from '../../utils/questionLanguage.js';
+import { isUnusableSearchAnswer } from '../../utils/qnaAnswerQuality.js';
 // FIX: 删除了重复引用，保留这一行正确的
 import { searchTicker, getFinancialData } from '../../services/finance.js';
+import {
+  buildFindCompaniesByConceptPrompt,
+  buildFindCompetitorsPrompt,
+  parseCompetitorsResponse,
+  parseConceptDiscoveryResponse,
+} from '../../utils/companyDiscovery.js';
 
 // This service contains the analysis logic ported from useStockAgent.ts
 // It can be used by both the worker and API routes
 
 export type ProgressCallback = (progress: number, step: string, log?: string) => void | Promise<void>;
 
-const getLatestDisclosedQuarter = (date: Date): { year: number; quarter: number } => {
-  const year = date.getFullYear();
-  const month = date.getMonth() + 1;
-  // Conservative disclosure assumptions:
-  // Q1 by May, Q2 by Aug, Q3 by Nov, Q4/annual by next spring.
-  if (month <= 4) return { year: year - 1, quarter: 3 };
-  if (month <= 7) return { year, quarter: 1 };
-  if (month <= 10) return { year, quarter: 2 };
-  return { year, quarter: 3 };
+const getFirstString = (obj: any, keys: string[]): string => {
+  for (const key of keys) {
+    const value = obj?.[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return '';
 };
 
-const buildRecencyGuidance = (date: Date) => {
-  const today = date.toISOString().slice(0, 10);
-  const { year: quarterYear, quarter } = getLatestDisclosedQuarter(date);
-  const latestAnnualYear = date.getFullYear() - 1;
-  const compareYear1 = latestAnnualYear - 1;
-  const compareYear2 = latestAnnualYear - 2;
+const normalizeEvidenceItem = (value: any): string => {
+  if (typeof value === 'string') return cleanupBrokenNumericFormatting(value);
+  if (typeof value === 'number' || typeof value === 'boolean') return cleanupBrokenNumericFormatting(String(value));
+  if (value && typeof value === 'object') {
+    const fromKnownKeys = getFirstString(value, [
+      'evidence',
+      'text',
+      'detail',
+      'fact',
+      'data',
+      'value',
+      'source',
+      'content',
+    ]);
+    if (fromKnownKeys) return cleanupBrokenNumericFormatting(fromKnownKeys);
+    try {
+      return cleanupBrokenNumericFormatting(JSON.stringify(value));
+    } catch {
+      return '';
+    }
+  }
+  return '';
+};
 
-  return `Today is ${today}.
-Prioritize the most recent information in this strict order:
-1) The latest 2-3 months of updates (news, announcements, policy changes, major events)
-2) ${quarterYear} Q${quarter} data and filings (latest disclosed quarter)
-3) ${latestAnnualYear} annual report / FY${latestAnnualYear} official disclosures (latest complete annual report)
-4) ${compareYear1} and ${compareYear2} only for historical comparison and trend context
-When newer authoritative data exists, do NOT anchor conclusions on older numbers.
-If newer data cannot be found, explicitly state the latest available date and why older data is used.
-Always include concrete dates or periods (YYYY-MM or YYYY-Qx) in key claims.`;
+const normalizeEvidenceList = (value: any): string[] => {
+  if (Array.isArray(value)) {
+    const items = value
+      .map(normalizeEvidenceItem)
+      .map(v => v.trim())
+      .filter(Boolean);
+    return mergeBrokenEvidenceFragments(items);
+  }
+  if (typeof value === 'string' && value.trim()) {
+    // Preserve evidence as complete prose. Splitting on single newlines can break dates like 2026-06-17.
+    return [cleanupBrokenNumericFormatting(value)].filter(Boolean);
+  }
+  if (value && typeof value === 'object') {
+    const single = normalizeEvidenceItem(value);
+    return single ? [single] : [];
+  }
+  return [];
+};
+
+const normalizeFinalBulletPoint = (point: any) => {
+  if (typeof point === 'string') {
+    return { argument: point.trim(), evidence: [] as string[] };
+  }
+  return {
+    argument: cleanupBrokenNumericFormatting(getFirstString(point, ['argument', 'claim', 'point', 'thesis', 'summary'])),
+    evidence: normalizeEvidenceList(
+      point?.evidence ??
+        point?.supporting_evidence ??
+        point?.supportingEvidence ??
+        point?.data_points ??
+        point?.dataPoints ??
+        point?.facts ??
+        point?.proof
+    ),
+  };
+};
+
+const normalizeFinalConclusion = (raw: any): FinalConclusion => {
+  const bulletRaw =
+    raw?.bullet_points ??
+    raw?.bulletPoints ??
+    raw?.key_points ??
+    raw?.keyPoints ??
+    raw?.points ??
+    raw?.arguments ??
+    [];
+  const bulletPoints = Array.isArray(bulletRaw)
+    ? bulletRaw.map(normalizeFinalBulletPoint)
+    : normalizeEvidenceList(bulletRaw).map(text => ({ argument: text, evidence: [] as string[] }));
+
+  return {
+    overall_conclusion: cleanupBrokenNumericFormatting(getFirstString(raw, [
+      'overall_conclusion',
+      'overallConclusion',
+      'conclusion',
+      'recommendation',
+      'verdict',
+    ])),
+    bullet_points: bulletPoints.filter(point => point.argument || point.evidence.length > 0),
+  };
 };
 
 export class AnalysisService {
-  constructor(private ai: GoogleGenAI) {}
+  constructor(private modelClient: ModelClient) {}
+
+  private isValidCompanyProfile(item: any): item is Pick<CompanyProfile, 'name' | 'ticker' | 'exchange'> {
+    return Boolean(
+      item &&
+        typeof item.name === 'string' &&
+        item.name.trim() &&
+        typeof item.ticker === 'string' &&
+        item.ticker.trim() &&
+        typeof item.exchange === 'string' &&
+        item.exchange.trim()
+    );
+  }
 
   async findCompetitors(
     focusCompany: Pick<CompanyProfile, 'name' | 'ticker'>,
@@ -61,33 +161,46 @@ export class AnalysisService {
       properties: {
         name: { type: Type.STRING, description: "Company's official name" },
         ticker: { type: Type.STRING, description: "Company's primary stock ticker" },
-        exchange: { type: Type.STRING, description: "Stock exchange (e.g., NASDAQ, NYSE, HKEX, SSE)" },
+        exchange: { type: Type.STRING, description: 'NASDAQ, NYSE, AMEX, HKEX, SSE, or SZSE' },
       },
       required: ['name', 'ticker', 'exchange'],
     };
-
-    const prompt = `The user's focus company is "${focusCompany.name} (${focusCompany.ticker})". Please identify two of its main publicly traded competitors. The competitors must be from US, Hong Kong, or A-share markets.
-    
-    Respond ONLY with a valid JSON object containing an array of two companies. The language for the company names should be ${outputLanguage}.`;
-
-    const response = await this.ai.models.generateContent({
-      model: ANALYSIS_MODEL,
-      contents: { role: 'user', parts: [{ text: prompt }] },
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            competitors: { type: Type.ARRAY, items: companySchema },
-          },
-          required: ['competitors'],
-        },
+    const responseSchema = {
+      type: Type.OBJECT,
+      properties: {
+        competitors: { type: Type.ARRAY, items: companySchema },
       },
-    });
+      required: ['competitors'],
+    };
 
-    // FIX: 增加空值保底
-    const parsed = JSON.parse(response.text || '{}');
-    const competitors = parsed.competitors || [];
+    const callDiscovery = async (strict: boolean) => {
+      const response = await this.modelClient.generateContent({
+        step: 'company_discovery',
+        contents: {
+          role: 'user',
+          parts: [{ text: buildFindCompetitorsPrompt(focusCompany, outputLanguage, strict) }],
+        },
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema,
+        },
+      });
+      return response.text || '';
+    };
+
+    let competitors = parseCompetitorsResponse(await callDiscovery(false)).filter(
+      c => c.ticker.toUpperCase() !== focusCompany.ticker.toUpperCase()
+    );
+    if (competitors.length === 0) {
+      competitors = parseCompetitorsResponse(await callDiscovery(true)).filter(
+        c => c.ticker.toUpperCase() !== focusCompany.ticker.toUpperCase()
+      );
+    }
+    if (competitors.length === 0) {
+      console.warn(
+        `[company_discovery] no competitors for ${focusCompany.name} (${focusCompany.ticker})`
+      );
+    }
     return competitors.slice(0, 2);
   }
 
@@ -101,74 +214,90 @@ export class AnalysisService {
       properties: {
         name: { type: Type.STRING, description: "Company's official name" },
         ticker: { type: Type.STRING, description: "Company's primary stock ticker" },
-        exchange: { type: Type.STRING, description: "Stock exchange (e.g., NASDAQ, NYSE, HKEX, SSE)" },
+        exchange: { type: Type.STRING, description: 'NASDAQ, NYSE, AMEX, HKEX, SSE, or SZSE' },
       },
       required: ['name', 'ticker', 'exchange'],
     };
-
-    const prompt = `The user searched for the concept: "${query}". A direct stock ticker match was not found. 
-    
-    Your task is:
-    1.  Identify the single most prominent publicly traded company related to this concept. This will be the focus company.
-    2.  Identify two other relevant publicly traded competitors.
-
-    All companies must be from US, Hong Kong, or A-share markets.
-    Respond ONLY with a valid JSON object. The language for the company names should be ${outputLanguage}.`;
-
-    const response = await this.ai.models.generateContent({
-      model: ANALYSIS_MODEL,
-      contents: { role: 'user', parts: [{ text: prompt }] },
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            focusCompany: companySchema,
-            candidateCompanies: { type: Type.ARRAY, items: companySchema },
-          },
-          required: ['focusCompany', 'candidateCompanies'],
-        },
+    const responseSchema = {
+      type: Type.OBJECT,
+      properties: {
+        focusCompany: companySchema,
+        candidateCompanies: { type: Type.ARRAY, items: companySchema },
       },
-    });
+      required: ['focusCompany', 'candidateCompanies'],
+    };
 
-    // FIX: 增加空值保底
-    const parsed = JSON.parse(response.text || '{}');
-    const { focusCompany, candidateCompanies } = parsed;
-    
-    // 增加安全性检查，防止 AI 返回空导致崩溃
-    if (!focusCompany) {
+    const callDiscovery = async (strict: boolean) => {
+      const response = await this.modelClient.generateContent({
+        step: 'company_discovery',
+        contents: {
+          role: 'user',
+          parts: [{ text: buildFindCompaniesByConceptPrompt(query, outputLanguage, strict) }],
+        },
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema,
+        },
+      });
+      return response.text || '';
+    };
+
+    let companies = parseConceptDiscoveryResponse(await callDiscovery(false));
+    if (companies.length === 0) {
+      companies = parseConceptDiscoveryResponse(await callDiscovery(true));
+    }
+    if (companies.length === 0) {
       throw new Error('Failed to identify companies from concept.');
     }
-    
-    return [focusCompany, ...(candidateCompanies || []).slice(0, 2)];
+    return companies.slice(0, 3);
   }
 
-  async generateQuestions(companyName: string, lang: Language): Promise<string[]> {
+  async generateQuestions(companyName: string, lang: Language, questionCount: number): Promise<string[]> {
     const outputLanguage = lang === 'cn' ? 'Simplified Chinese' : 'English';
     const now = new Date();
-    const prompt = `Generate exactly 10 critical investment research questions in ${outputLanguage} about "${companyName}". Cover: supply chain, market position, business model, financials, growth drivers, competitive advantages, risks, management, recent news, and valuation.
-${buildRecencyGuidance(now)}
-Ensure several questions explicitly require the latest quarter, latest annual report, and very recent 2-3 month developments.
-Respond ONLY with a valid JSON object: {"questions": ["...", ...]}`;
+    const recencyGuidance = buildRecencyGuidance(now, lang);
 
-    const response = await this.ai.models.generateContent({
-      model: ANALYSIS_MODEL,
-      contents: { role: 'user', parts: [{ text: prompt }] },
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            questions: { type: Type.ARRAY, items: { type: Type.STRING } },
+    const callBatch = async (
+      batchSize: number,
+      batchIndex: number,
+      batchTotal: number,
+      priorQuestionCount: number,
+      strictLanguageRetry: boolean
+    ) => {
+      const prompt = buildGenerateQuestionsPrompt(
+        companyName,
+        outputLanguage,
+        batchSize,
+        recencyGuidance,
+        { batchIndex, batchTotal, priorQuestionCount },
+        strictLanguageRetry
+      );
+      const response = await this.modelClient.generateContent({
+        step: 'question_generation',
+        contents: { role: 'user', parts: [{ text: prompt }] },
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              questions: { type: Type.ARRAY, items: { type: Type.STRING } },
+            },
+            required: ['questions'],
           },
-          required: ['questions'],
         },
-      },
-    });
+      });
+      const parsed = parseModelJsonResponse(response.text || '{}') as { questions?: string[] };
+      const questions = Array.isArray(parsed.questions) ? parsed.questions : [];
+      return questions.slice(0, batchSize);
+    };
 
-    // FIX: 增加空值保底
-    const parsed = JSON.parse(response.text || '{}');
-    return parsed.questions || [];
+    return generateQuestionsInBatches(questionCount, async (batchSize, batchIndex, batchTotal, priorQuestionCount) => {
+      const raw = await callBatch(batchSize, batchIndex, batchTotal, priorQuestionCount, false);
+      return pickLanguageValidQuestions(raw, lang, () =>
+        callBatch(batchSize, batchIndex, batchTotal, priorQuestionCount, true),
+        batchSize
+      );
+    });
   }
 
   async answerQuestion(
@@ -182,23 +311,24 @@ Respond ONLY with a valid JSON object: {"questions": ["...", ...]}`;
     
     // Notify before starting Google Search
     if (onProgress) {
-      await onProgress(`Searching Google for: ${question.substring(0, 60)}...`);
+      await onProgress(`Searching web for: ${question.substring(0, 60)}...`);
     }
     
     const prompt = `As a financial analyst, answer this question about "${companyName}" in ${outputLanguage}: "${question}".
-${buildRecencyGuidance(now)}
+${buildRecencyGuidance(now, lang)}
 Answer requirements:
 - Use freshest available data first; older data is secondary context only.
 - If the latest filing/period is unavailable, clearly disclose that limitation.
 - For key facts, include period labels (e.g. YYYY-Qx, YYYY annual report, YYYY-MM).
 - Cite sources.`;
 
-    const response = await this.ai.models.generateContent({
-      model: ANALYSIS_MODEL,
+    const response = await this.modelClient.generateContent({
+      step: 'answer_question',
       contents: { role: 'user', parts: [{ text: prompt }] },
       config: {
         tools: [{ googleSearch: {} }],
       },
+      requireGoogleSearch: true,
     });
 
     const sources: GroundingSource[] =
@@ -212,7 +342,11 @@ Answer requirements:
     }
 
     // FIX: 增加空值保底
-    return { question, answer: response.text || '', sources };
+    const answer = response.text || '';
+    if (isUnusableSearchAnswer(answer)) {
+      throw new Error(`Search returned no usable evidence for question: ${question.substring(0, 80)}`);
+    }
+    return { question, answer, sources };
   }
 
   async synthesizeConclusion(
@@ -231,36 +365,48 @@ Answer requirements:
       required: ['summary', 'evidence'],
     };
 
-    const prompt = `Based on this Q&A for "${companyName}", synthesize an investment thesis in ${outputLanguage}. Structure the response into: "UpstreamSupplyChain", "MarketPosition", "BusinessModel", "Financials", "OutlookRisks". For each, provide a summary and list key evidence from the Q&A.
-${buildRecencyGuidance(now)}
-When evidence conflicts across years, prioritize the latest period and explain differences briefly.
-Respond ONLY with a valid JSON object. Q&A: ${JSON.stringify(qna.map(item => ({ q: item.question, a: item.answer })))}`;
+    const qnaPayload = qna.map(item => ({
+      question: item.question,
+      answer: item.answer,
+      sources: item.sources,
+    }));
 
-    const response = await this.ai.models.generateContent({
-      model: ANALYSIS_MODEL,
-      contents: { role: 'user', parts: [{ text: prompt }] },
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            UpstreamSupplyChain: conclusionSectionSchema,
-            MarketPosition: conclusionSectionSchema,
-            BusinessModel: conclusionSectionSchema,
-            Financials: conclusionSectionSchema,
-            OutlookRisks: conclusionSectionSchema,
+    return synthesizeInvestmentConclusionBySections({
+      companyName,
+      outputLanguage,
+      recencyGuidance: buildRecencyGuidance(now, lang),
+      qna: qnaPayload,
+      callSection: async (sectionKey: ThesisSectionKey, prompt: string) => {
+        const response = await this.modelClient.generateContent({
+          step: 'synthesize_conclusion_section',
+          contents: { role: 'user', parts: [{ text: prompt }] },
+          config: {
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                [sectionKey]: conclusionSectionSchema,
+              },
+              required: [sectionKey],
+            },
           },
-        },
+        });
+        const normalized = normalizeInvestmentConclusion(parseModelJsonResponse(response.text || '{}'));
+        return { sectionKey, section: normalized[sectionKey] };
       },
     });
+  }
 
-    // FIX: 增加空值保底
-    return JSON.parse(response.text || '{}');
+  private hasUsableFinalConclusion(finalConclusion: FinalConclusion | null | undefined): boolean {
+    if (!finalConclusion) return false;
+    return Boolean(finalConclusion.overall_conclusion) ||
+      (Array.isArray(finalConclusion.bullet_points) && finalConclusion.bullet_points.length > 0);
   }
 
   async generateFinalConclusion(
     companyName: string,
     qna: QnAResult[],
+    conclusion: InvestmentConclusion,
     lang: Language
   ): Promise<FinalConclusion> {
     const outputLanguage = lang === 'cn' ? 'Simplified Chinese' : 'English';
@@ -271,7 +417,7 @@ Respond ONLY with a valid JSON object. Q&A: ${JSON.stringify(qna.map(item => ({ 
       properties: {
         overall_conclusion: {
           type: Type.STRING,
-          description: `A concise, overall investment conclusion for ${companyName} (e.g., 'Strong Buy', 'Hold', 'Sell with caution').`,
+          description: `Rating plus 3-5 sentence executive summary for ${companyName}.`,
         },
         bullet_points: {
           type: Type.ARRAY,
@@ -285,7 +431,7 @@ Respond ONLY with a valid JSON object. Q&A: ${JSON.stringify(qna.map(item => ({ 
               evidence: {
                 type: Type.ARRAY,
                 items: { type: Type.STRING },
-                description: 'A list of specific data points or facts from the Q&A that support the argument.',
+                description: '2-3 specific data points supporting the argument.',
               },
             },
             required: ['argument', 'evidence'],
@@ -295,29 +441,38 @@ Respond ONLY with a valid JSON object. Q&A: ${JSON.stringify(qna.map(item => ({ 
       required: ['overall_conclusion', 'bullet_points'],
     };
 
-    const prompt = `You are a senior investment analyst. Based on the following comprehensive Q&A for "${companyName}", provide a final, decisive investment conclusion in ${outputLanguage}. 
-    
-    Your task is to:
-    1.  Formulate a clear, one-sentence overall conclusion (e.g., 'Strong Buy', 'Hold', 'Speculative Buy', 'Sell').
-    2.  Provide 3-5 bullet points that summarize the most critical arguments supporting your conclusion.
-    3.  For each argument, cite specific, quantitative evidence directly from the provided Q&A.
-    ${buildRecencyGuidance(now)}
-    
-    Respond ONLY with a valid JSON object matching the required schema.
-    
-    Q&A Context: ${JSON.stringify(qna.map(item => ({ question: item.question, answer: item.answer })))}`;
+    const buildPrompt = (strict: boolean) => {
+      const base = buildFinalConclusionPrompt(
+        companyName,
+        outputLanguage,
+        buildRecencyGuidance(now, lang),
+        conclusion,
+        qna.map(item => ({ question: item.question, answer: item.answer, sources: item.sources }))
+      );
+      if (!strict) return base;
+      return `${base}\n\n${buildFinalConclusionStrictRetrySuffix()}`;
+    };
 
-    const response = await this.ai.models.generateContent({
-      model: ANALYSIS_MODEL,
-      contents: { role: 'user', parts: [{ text: prompt }] },
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: finalConclusionSchema,
-      },
-    });
+    const callModel = async (strict: boolean) => {
+      const response = await this.modelClient.generateContent({
+        step: 'final_conclusion',
+        contents: { role: 'user', parts: [{ text: buildPrompt(strict) }] },
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: finalConclusionSchema,
+        },
+      });
+      return normalizeFinalConclusion(parseModelJsonResponse(response.text || '{}'));
+    };
 
-    // FIX: 增加空值保底
-    return JSON.parse(response.text || '{}');
+    let finalConclusion = await callModel(false);
+    if (!this.hasUsableFinalConclusion(finalConclusion)) {
+      finalConclusion = await callModel(true);
+    }
+    if (!this.hasUsableFinalConclusion(finalConclusion)) {
+      throw new Error(`Failed to generate a usable final investment conclusion for ${companyName}.`);
+    }
+    return finalConclusion;
   }
 
   async generateCompanyQuickTake(
@@ -344,8 +499,8 @@ Hard requirements:
 5) Forbidden vague phrases (or their equivalents): "core product and service model", "certain differentiation", "comprehensive conclusion", "etc.".
 6) No markdown, no bullet points, no disclaimer.`;
 
-    const response = await this.ai.models.generateContent({
-      model: ANALYSIS_MODEL,
+    const response = await this.modelClient.generateContent({
+      step: 'quick_take',
       contents: { role: 'user', parts: [{ text: prompt }] },
     });
 
@@ -355,7 +510,9 @@ Hard requirements:
   async runAnalysisForCompany(
     company: CompanyProfile,
     lang: Language,
-    onProgress?: ProgressCallback
+    questionCount: number,
+    onProgress?: ProgressCallback,
+    existing?: Pick<CompanyAnalysis, 'questions' | 'qna' | 'conclusion' | 'finalConclusion'> | null
   ): Promise<{ questions: string[]; qna: QnAResult[]; conclusion: InvestmentConclusion; finalConclusion: FinalConclusion }> {
     const log = async (progress: number, step: string, message?: string) => {
       const logMessage = message || step;
@@ -364,35 +521,80 @@ Hard requirements:
       }
     };
 
-    // Before generating questions: "Deconstructing narrative..."
-    await log(5, 'Deconstructing narrative...', `Analyzing ${company.name} investment thesis`);
-    const questions = await this.generateQuestions(company.name, lang);
-    await log(10, 'Questions Generated', `Created ${questions.length} research questions`);
+    const existingQuestions = Array.isArray(existing?.questions) ? existing!.questions : [];
+    const existingQna = Array.isArray(existing?.qna) ? existing!.qna : [];
+    const existingConclusion = hasUsableInvestmentConclusion(existing?.conclusion) ? existing!.conclusion! : null;
+    const existingFinalConclusion = this.hasUsableFinalConclusion(existing?.finalConclusion)
+      ? existing!.finalConclusion!
+      : null;
 
-    const qnaResults: QnAResult[] = [];
-    for (let i = 0; i < questions.length; i++) {
-      const question = questions[i];
-      const questionProgress = 10 + (i / questions.length) * 60;
-      
-      // Create a progress callback for answerQuestion that maps to overall progress
-      const questionProgressCallback = onProgress ? async (message: string) => {
-        // Update progress with the question-specific message
-        await log(questionProgress, `Question ${i + 1}/${questions.length}`, message);
-      } : undefined;
-      
-      await log(questionProgress, `Answering Question ${i + 1}/${questions.length}`, question.substring(0, 60) + '...');
-      const result = await this.answerQuestion(question, company.name, lang, questionProgressCallback);
-      qnaResults.push(result);
-      await log(questionProgress + (60 / questions.length), `Question ${i + 1} Answered`, `Found ${result.sources.length} sources`);
+    let questions = existingQuestions;
+    if (!questions.length) {
+      await log(5, 'Deconstructing narrative...', `Analyzing ${company.name} investment thesis`);
+      questions = await this.generateQuestions(company.name, lang, questionCount);
+      await log(10, 'Questions Generated', `Created ${questions.length} research questions`);
     }
 
-    // Before synthesis: "Synthesizing final report..."
-    await log(75, 'Synthesizing final report...', 'Analyzing Q&A results and generating investment thesis');
-    const conclusion = await this.synthesizeConclusion(company.name, qnaResults, lang);
-    await log(85, 'Conclusion Synthesized', 'Investment thesis generated');
+    const totalQuestions = questions.length || questionCount;
+    const { qnaByQuestion, pendingIndices } = indexAnsweredQuestions(questions, existingQna);
+    let completedCount = qnaByQuestion.size;
 
-    await log(90, 'Generating Final Conclusion', 'Creating executive summary');
-    const finalConclusion = await this.generateFinalConclusion(company.name, qnaResults, lang);
+    const reportQnaProgress = async (completed: number) => {
+      const questionProgress = 10 + (completed / totalQuestions) * 60;
+      await log(
+        questionProgress,
+        `Completed ${completed}/${totalQuestions} questions`,
+        `${completed} of ${totalQuestions} questions answered`
+      );
+    };
+
+    await reportQnaProgress(completedCount);
+
+    if (pendingIndices.length > 0) {
+      const pendingTasks = pendingIndices.map(index => ({
+        index,
+        item: questions[index],
+      }));
+
+      await runParallelIndexedTasks<string, QnAResult>(
+        pendingTasks,
+        async task => this.answerQuestion(task.item, company.name, lang),
+        {
+          concurrency: QNA_CONCURRENCY,
+          onTaskComplete: async (result, task) => {
+            qnaByQuestion.set(result.question, result);
+            completedCount = qnaByQuestion.size;
+            await reportQnaProgress(completedCount);
+            const questionProgress = 10 + (completedCount / totalQuestions) * 60;
+            await log(
+              questionProgress,
+              `Completed ${completedCount}/${totalQuestions} questions`,
+              `Answered: ${task.item.substring(0, 60)}... (${result.sources.length} sources)`
+            );
+          },
+        }
+      );
+    }
+
+    const qnaResults = orderQnaByQuestions(questions, qnaByQuestion);
+    if (qnaResults.length < questions.length) {
+      throw new Error(
+        `Only ${qnaResults.length}/${questions.length} questions answered for ${company.name}. Retry to continue remaining items.`
+      );
+    }
+
+    let conclusion = existingConclusion;
+    if (!conclusion) {
+      await log(75, 'Synthesizing final report...', 'Analyzing Q&A results and generating investment thesis');
+      conclusion = await this.synthesizeConclusion(company.name, qnaResults, lang);
+      await log(85, 'Conclusion Synthesized', 'Investment thesis generated');
+    }
+
+    let finalConclusion = existingFinalConclusion;
+    if (!finalConclusion) {
+      await log(90, 'Generating Final Conclusion', 'Creating executive summary');
+      finalConclusion = await this.generateFinalConclusion(company.name, qnaResults, conclusion, lang);
+    }
     await log(100, 'Analysis Complete', `${company.name} analysis finished`);
 
     return {
@@ -408,6 +610,7 @@ Hard requirements:
     lang: Language,
     onProgress?: ProgressCallback
   ): Promise<AnalysisState> {
+    const runtimeConfig = getRuntimeModelConfig();
     const id = Date.now().toString();
     const timestamp = new Date().toISOString();
 
@@ -429,14 +632,36 @@ Hard requirements:
 
     if (exactMatch) {
       await log(15, 'Finding Competitors', `Found exact match: ${exactMatch.name} (${exactMatch.ticker})`);
-      const competitors = await this.findCompetitors(exactMatch, lang);
+      let competitors = await this.findCompetitors(exactMatch, lang);
+      if (competitors.length === 0) {
+        try {
+          const conceptCandidates = await this.findCompaniesByConcept(exactMatch.name, lang);
+          competitors = conceptCandidates
+            .filter(c => c.ticker.toUpperCase() !== exactMatch.ticker.toUpperCase())
+            .slice(0, 2);
+        } catch {
+          // keep empty competitors if fallback discovery also fails
+        }
+      }
       companyProfiles = [exactMatch, ...competitors];
       await log(20, 'Competitors Found', `Found ${competitors.length} competitors`);
     } else {
       await log(15, 'Searching by Concept', `No exact match found, searching by concept`);
-      companyProfiles = await this.findCompaniesByConcept(query, lang);
+      try {
+        companyProfiles = await this.findCompaniesByConcept(query, lang);
+      } catch (conceptError) {
+        const fallbackMatch = await searchTicker(query);
+        if (fallbackMatch) {
+          const competitors = await this.findCompetitors(fallbackMatch, lang);
+          companyProfiles = [fallbackMatch, ...competitors];
+        } else {
+          throw conceptError;
+        }
+      }
       await log(20, 'Companies Found', `Found ${companyProfiles.length} companies`);
     }
+
+    companyProfiles = companyProfiles.filter(c => this.isValidCompanyProfile(c));
 
     if (companyProfiles.length === 0) {
       throw new Error("Could not identify any companies for the given query.");
@@ -464,6 +689,7 @@ Hard requirements:
     const focusAnalysis = await this.runAnalysisForCompany(
       focusProfile,
       lang,
+      runtimeConfig.questions.focus,
       async (progress, step, message) => {
         // Map company analysis progress (0-80%) to overall progress (55-75%)
         const overallProgress = 55 + Math.floor(progress * 0.2);
@@ -492,6 +718,7 @@ Hard requirements:
       const analysis = await this.runAnalysisForCompany(
         profile,
         lang,
+        runtimeConfig.questions.candidate,
         async (progress, step, message) => {
           // Map company analysis progress to overall progress
           const baseProgress = 75 + i * 5;
