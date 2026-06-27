@@ -22,7 +22,7 @@ import {
 import { synthesizeInvestmentConclusionBySections } from '../../utils/synthesizeConclusionOrchestrator.js';
 import type { ThesisSectionKey } from '../../utils/synthesizeConclusionPrompt.js';
 import { QNA_CONCURRENCY, runParallelIndexedTasks } from '../../utils/parallelTasks.js';
-import { indexAnsweredQuestions, orderQnaByQuestions } from '../../utils/qnaHelpers.js';
+import { indexAnsweredQuestions, orderQnaByQuestions, countAnsweredQuestions } from '../../utils/qnaHelpers.js';
 import { buildGenerateQuestionsPrompt } from '../../utils/questionGenerationPrompt.js';
 import { generateQuestionsInBatches } from '../../utils/questionGenerationBatches.js';
 import { buildRecencyGuidance } from '../../utils/recencyGuidance.js';
@@ -537,14 +537,15 @@ Hard requirements:
 
     const totalQuestions = questions.length || questionCount;
     const { qnaByQuestion, pendingIndices } = indexAnsweredQuestions(questions, existingQna);
-    let completedCount = qnaByQuestion.size;
+    let completedCount = countAnsweredQuestions(questions, qnaByQuestion);
 
     const reportQnaProgress = async (completed: number) => {
-      const questionProgress = 10 + (completed / totalQuestions) * 60;
+      const safeCompleted = Math.min(completed, totalQuestions);
+      const questionProgress = 10 + (safeCompleted / totalQuestions) * 60;
       await log(
         questionProgress,
-        `Completed ${completed}/${totalQuestions} questions`,
-        `${completed} of ${totalQuestions} questions answered`
+        `Completed ${safeCompleted}/${totalQuestions} questions`,
+        `${safeCompleted} of ${totalQuestions} questions answered`
       );
     };
 
@@ -562,13 +563,14 @@ Hard requirements:
         {
           concurrency: QNA_CONCURRENCY,
           onTaskComplete: async (result, task) => {
-            qnaByQuestion.set(result.question, result);
-            completedCount = qnaByQuestion.size;
+            const questionKey = questions[task.index];
+            qnaByQuestion.set(questionKey, { ...result, question: questionKey });
+            completedCount = countAnsweredQuestions(questions, qnaByQuestion);
             await reportQnaProgress(completedCount);
-            const questionProgress = 10 + (completedCount / totalQuestions) * 60;
+            const questionProgress = 10 + (Math.min(completedCount, totalQuestions) / totalQuestions) * 60;
             await log(
               questionProgress,
-              `Completed ${completedCount}/${totalQuestions} questions`,
+              `Completed ${Math.min(completedCount, totalQuestions)}/${totalQuestions} questions`,
               `Answered: ${task.item.substring(0, 60)}... (${result.sources.length} sources)`
             );
           },

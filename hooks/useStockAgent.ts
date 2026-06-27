@@ -16,7 +16,7 @@ import {
 import { synthesizeInvestmentConclusionBySections } from '../utils/synthesizeConclusionOrchestrator.ts';
 import type { ThesisSectionKey } from '../utils/synthesizeConclusionPrompt.ts';
 import { QNA_CONCURRENCY, runParallelIndexedTasks } from '../utils/parallelTasks.ts';
-import { indexAnsweredQuestions, orderQnaByQuestions } from '../utils/qnaHelpers.ts';
+import { indexAnsweredQuestions, orderQnaByQuestions, countAnsweredQuestions } from '../utils/qnaHelpers.ts';
 import { isUnusableSearchAnswer } from '../utils/qnaAnswerQuality.ts';
 import {
   buildFindCompaniesByConceptPrompt,
@@ -1197,18 +1197,19 @@ Hard requirements:
 
       updateCompanyState(companyId, { status: 'answering_questions' });
       const { qnaByQuestion, pendingIndices } = indexAnsweredQuestions(questions, existingQna);
-      let completedCount = qnaByQuestion.size;
+      let completedCount = countAnsweredQuestions(questions, qnaByQuestion);
 
       if (completedCount > 0) {
         updateCompanyState(companyId, { qna: orderQnaByQuestions(questions, qnaByQuestion) });
       }
 
       const reportQnaProgress = (completed: number) => {
+        const safeCompleted = Math.min(completed, totalQuestions);
         updateState({
-          currentStage: uiText.answeringQuestions
-            .replace('{current}', String(completed))
-            .replace('{total}', String(totalQuestions)),
-          currentProgress: 20 + Math.floor((completed / totalQuestions) * 50),
+          currentStage: (lang === 'cn'
+            ? `${company.name}：已完成 ${safeCompleted}/${totalQuestions} 题...`
+            : `${company.name}: Completed ${safeCompleted}/${totalQuestions} questions...`),
+          currentProgress: 20 + Math.floor((safeCompleted / totalQuestions) * 50),
         });
       };
 
@@ -1228,9 +1229,10 @@ Hard requirements:
               : answerQuestion(task.item, company.name, lang),
           {
             concurrency: QNA_CONCURRENCY,
-            onTaskComplete: async result => {
-              qnaByQuestion.set(result.question, result);
-              completedCount = qnaByQuestion.size;
+            onTaskComplete: async (result, task) => {
+              const questionKey = questions[task.index];
+              qnaByQuestion.set(questionKey, { ...result, question: questionKey });
+              completedCount = countAnsweredQuestions(questions, qnaByQuestion);
               updateCompanyState(companyId, { qna: orderQnaByQuestions(questions, qnaByQuestion) });
               reportQnaProgress(completedCount);
             },
@@ -1268,8 +1270,14 @@ Hard requirements:
           : await generateFinalConclusion(company.name, qnaResults, conclusion, lang);
       }
       updateCompanyState(companyId, { finalConclusion, status: 'complete' });
-      
-      updateState({ currentProgress: 100 });
+
+      updateState({
+        currentStage:
+          lang === 'cn'
+            ? `${company.name}：分析完成`
+            : `${company.name}: analysis complete`,
+        currentProgress: 100,
+      });
 
     } catch (e) {
       console.error(`Error analyzing ${company.name}:`, e);

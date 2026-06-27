@@ -108,6 +108,8 @@ export const AnalysisComponent: React.FC<AnalysisComponentProps> = ({
 
   const allCompanies = [analysisState.focusCompany, ...analysisState.candidateCompanies];
   const incompleteCompanies = findIncompleteCompanies(allCompanies);
+  const showGlobalProgress =
+    analysisState.status === 'analyzing' && incompleteCompanies.length > 0;
   const reportTimestamp = analysisState.timestamp
     ? new Date(analysisState.timestamp).toLocaleString()
     : null;
@@ -155,7 +157,9 @@ export const AnalysisComponent: React.FC<AnalysisComponentProps> = ({
           )}
         </div>
       )}
-      <LoadingComponent stage={analysisState.currentStage} progress={analysisState.currentProgress} />
+      {showGlobalProgress && (
+        <LoadingComponent stage={analysisState.currentStage} progress={analysisState.currentProgress} />
+      )}
 
       {onLoadReport && timelineEntries.length > 1 && (
         <CompanyTimelineStrip
