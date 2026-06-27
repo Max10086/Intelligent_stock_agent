@@ -1,6 +1,6 @@
 import { RuntimeModelConfig, SearchProvider } from '../types.ts';
 
-export const RUNTIME_MODEL_CONFIG_STORAGE_KEY = 'intelligentStockAgentRuntimeModelConfigV6';
+export const RUNTIME_MODEL_CONFIG_STORAGE_KEY = 'intelligentStockAgentRuntimeModelConfigV7';
 
 export const DEFAULT_RUNTIME_MODEL_CONFIG: RuntimeModelConfig = {
   analysis: { provider: 'deepseek', model: 'deepseek-v4-pro' },

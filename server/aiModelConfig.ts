@@ -177,14 +177,26 @@ function loadPersistedRuntimeOverrides(): RuntimeOverride {
 
 let runtimeOverrides: RuntimeOverride = loadPersistedRuntimeOverrides();
 
+/** Cloud Run / server env vars pin defaults; they beat persisted .runtime-model-config.json. */
+const envPinnedSearchProvider = process.env.SEARCH_MODEL_PROVIDER?.trim()
+  ? normalizeSearchProvider(process.env.SEARCH_MODEL_PROVIDER, SEARCH_MODEL_PROVIDER)
+  : undefined;
+const envPinnedSearchModel = cleanModel(process.env.SEARCH_MODEL);
+const envPinnedAnalysisProvider = process.env.ANALYSIS_MODEL_PROVIDER?.trim()
+  ? normalizeProvider(process.env.ANALYSIS_MODEL_PROVIDER, ANALYSIS_MODEL_PROVIDER)
+  : undefined;
+const envPinnedAnalysisModel = cleanModel(process.env.ANALYSIS_MODEL);
+
 export const getRuntimeModelConfig = () => ({
   search: {
-    provider: runtimeOverrides.search?.provider || SEARCH_MODEL_PROVIDER,
-    model: runtimeOverrides.search?.model || SEARCH_MODEL,
+    provider:
+      envPinnedSearchProvider || runtimeOverrides.search?.provider || SEARCH_MODEL_PROVIDER,
+    model: envPinnedSearchModel || runtimeOverrides.search?.model || SEARCH_MODEL,
   },
   analysis: {
-    provider: runtimeOverrides.analysis?.provider || ANALYSIS_MODEL_PROVIDER,
-    model: runtimeOverrides.analysis?.model || ANALYSIS_MODEL,
+    provider:
+      envPinnedAnalysisProvider || runtimeOverrides.analysis?.provider || ANALYSIS_MODEL_PROVIDER,
+    model: envPinnedAnalysisModel || runtimeOverrides.analysis?.model || ANALYSIS_MODEL,
   },
   questions: {
     focus: runtimeOverrides.questions?.focus || FOCUS_QUESTION_COUNT,

@@ -389,6 +389,13 @@ export const useStockAgent = () => {
   }, []);
 
   const syncRuntimeModelConfigFromUserSettings = useCallback(async (): Promise<RuntimeModelConfig> => {
+    const fromServer = await reloadRuntimeModelConfig();
+    if (fromServer) {
+      setRuntimeModelConfig(fromServer);
+      saveStoredRuntimeModelConfig(fromServer);
+      return fromServer;
+    }
+
     const stored = loadStoredRuntimeModelConfig(DEFAULT_RUNTIME_MODEL_CONFIG);
     if (stored) {
       setRuntimeModelConfig(stored);
@@ -398,12 +405,6 @@ export const useStockAgent = () => {
         console.warn('Failed to sync stored model settings to backend:', error);
       }
       return stored;
-    }
-
-    const fromServer = await reloadRuntimeModelConfig();
-    if (fromServer) {
-      saveStoredRuntimeModelConfig(fromServer);
-      return fromServer;
     }
 
     setRuntimeModelConfig(DEFAULT_RUNTIME_MODEL_CONFIG);
