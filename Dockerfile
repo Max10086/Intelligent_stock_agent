@@ -58,9 +58,13 @@
 
     # 【F. 新增这行！】复制根目录下的 services 文件夹
     COPY --from=builder /app/services ./services
+
+    # G. server 与 services 均依赖 utils/（v2.0 大量逻辑在此）
+    COPY --from=builder /app/utils ./utils
     
     # 8. 暴露端口
     ENV PORT=8080
+    ENV NODE_ENV=production
     EXPOSE 8080
     
     # 9. 启动命令
