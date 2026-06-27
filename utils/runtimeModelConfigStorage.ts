@@ -4,7 +4,7 @@ export const RUNTIME_MODEL_CONFIG_STORAGE_KEY = 'intelligentStockAgentRuntimeMod
 
 export const DEFAULT_RUNTIME_MODEL_CONFIG: RuntimeModelConfig = {
   analysis: { provider: 'deepseek', model: 'deepseek-v4-pro' },
-  search: { provider: 'vertex', model: 'gemini-3-flash-preview' },
+  search: { provider: 'doubao', model: 'deepseek-v4-pro' },
   questions: { focus: 15, candidate: 15 },
   qna: { thinkingEnabled: false },
 };
@@ -16,7 +16,12 @@ export const normalizeRuntimeModelConfig = (
   fallback: RuntimeModelConfig = DEFAULT_RUNTIME_MODEL_CONFIG
 ): RuntimeModelConfig => {
   const parsed = raw as Partial<RuntimeModelConfig> | null | undefined;
-  const searchProvider: SearchProvider = parsed?.search?.provider === 'doubao' ? 'doubao' : 'vertex';
+  const searchProvider: SearchProvider =
+    parsed?.search?.provider === 'vertex'
+      ? 'vertex'
+      : parsed?.search?.provider === 'doubao'
+        ? 'doubao'
+        : fallback.search.provider;
 
   return {
     analysis: {

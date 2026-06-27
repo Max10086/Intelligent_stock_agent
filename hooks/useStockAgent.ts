@@ -60,7 +60,8 @@ const PENDING_SAVE_KEY = 'intelligentStockAgentPendingSaves';
 const API_BASE_URL = typeof window !== 'undefined' ? '' : 'http://localhost:3001';
 const HISTORY_FETCH_TIMEOUT_MS = 45000;
 
-const normalizeSearchProvider = (value: unknown): SearchProvider => (value === 'doubao' ? 'doubao' : 'vertex');
+const normalizeSearchProvider = (value: unknown): SearchProvider =>
+  value === 'vertex' ? 'vertex' : 'doubao';
 
 const getFirstString = (obj: any, keys: string[]): string => {
   for (const key of keys) {

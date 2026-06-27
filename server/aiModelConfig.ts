@@ -31,12 +31,12 @@ const normalizeSearchProvider = (value: string | undefined, fallback: SearchProv
   return fallback;
 };
 
-export const SEARCH_MODEL_PROVIDER: SearchProvider = normalizeSearchProvider(process.env.SEARCH_MODEL_PROVIDER, 'vertex');
+export const SEARCH_MODEL_PROVIDER: SearchProvider = normalizeSearchProvider(process.env.SEARCH_MODEL_PROVIDER, 'doubao');
 export const SEARCH_MODEL =
   (process.env.SEARCH_MODEL && process.env.SEARCH_MODEL.trim()) ||
   (process.env.VERTEX_SEARCH_MODEL && process.env.VERTEX_SEARCH_MODEL.trim()) ||
   (process.env.DOUBAO_SEARCH_MODEL && process.env.DOUBAO_SEARCH_MODEL.trim()) ||
-  (SEARCH_MODEL_PROVIDER === 'doubao' ? 'doubao-seed-1-6-thinking-250715' : 'gemini-3-flash-preview');
+  (SEARCH_MODEL_PROVIDER === 'doubao' ? 'deepseek-v4-pro' : 'gemini-3-flash-preview');
 
 // Non-search analysis model can be switched (e.g. deepseek-v4-pro).
 export const ANALYSIS_MODEL_PROVIDER = normalizeProvider(process.env.ANALYSIS_MODEL_PROVIDER, 'deepseek');

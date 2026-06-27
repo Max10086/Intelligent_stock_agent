@@ -137,7 +137,7 @@ export const ModelSettingsPanel: React.FC<ModelSettingsPanelProps> = ({
               value={searchModel}
               onChange={e => setSearchModel(e.target.value)}
               className="bg-gray-900 border border-gray-600 rounded px-2 py-2 text-sm text-white"
-              placeholder={searchProvider === 'doubao' ? 'doubao-seed-1-6-thinking-250715' : 'gemini-3-flash-preview'}
+              placeholder={searchProvider === 'doubao' ? 'deepseek-v4-pro' : 'gemini-3-flash-preview'}
             />
           </label>
 
