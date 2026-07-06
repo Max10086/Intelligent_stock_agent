@@ -1,105 +1,36 @@
-import React, { useState, useCallback, useEffect } from 'react';
-import { Language } from '../types.ts';
+import React, { useState, useCallback } from 'react';
+import { Language, AnalysisState } from '../types.ts';
 import { getUIText } from '../constants.ts';
-import { useBatchJobs } from '../hooks/useBatchJobs.ts';
+import { QueueDashboardState, QueueJobItem } from '../hooks/useBatchJobs.ts';
+import { apiFetch } from '../utils/authenticatedFetch.ts';
 
 interface BatchQueuePageProps {
   language: Language;
+  queueStatus: QueueDashboardState | null;
+  queueFetchError: string | null;
+  onRefreshQueue: () => void;
+  submitBatchJob: (tickers: string, language: Language) => Promise<unknown>;
+  retryFailedJob?: (jobId: string) => Promise<unknown>;
+  onLoadReport?: (payload: { id: string; result: AnalysisState }) => void;
+  onRefreshHistory?: () => void;
 }
 
-interface QueueJob {
-  id: string;
-  ticker: string;
-  companyName?: string | null;
-  overallConclusion?: string | null;
-  currentPrice?: string | null;
-  currency?: string | null;
-  estimatedCostUsd?: number | null;
-  totalTokens?: number | null;
-  status: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
-  createdAt: string;
-  completedAt: string | null;
-  result: any | null;
-  progress?: number;
-  currentStep?: string | null;
-  logs?: string[] | null;
-}
-
-interface QueueStatus {
-  jobs: QueueJob[];
-  total: number;
-  stats: {
-    pending: number;
-    processing: number;
-    completed: number;
-    failed: number;
-  };
-}
-
-const API_BASE_URL = typeof window !== 'undefined' ? '' : 'http://localhost:3001';
-
-export const BatchQueuePage: React.FC<BatchQueuePageProps> = ({ language }) => {
+export const BatchQueuePage: React.FC<BatchQueuePageProps> = ({
+  language,
+  queueStatus,
+  queueFetchError,
+  onRefreshQueue,
+  submitBatchJob,
+  retryFailedJob,
+  onLoadReport,
+  onRefreshHistory,
+}) => {
   const [tickersInput, setTickersInput] = useState('');
-  const [queueStatus, setQueueStatus] = useState<QueueStatus | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const { submitBatchJob } = useBatchJobs();
+  const [loadingReportId, setLoadingReportId] = useState<string | null>(null);
+  const [retryingJobId, setRetryingJobId] = useState<string | null>(null);
   const uiText = getUIText(language);
-
-  // Fetch queue status
-  const fetchQueueStatus = useCallback(async () => {
-    try {
-      const response = await fetch(`${API_BASE_URL}/api/jobs`);
-      if (!response.ok) {
-        throw new Error('Failed to fetch queue status');
-      }
-      const data = await response.json();
-      
-      // Transform jobs to match QueueJob interface
-      const transformedJobs: QueueJob[] = (data.jobs || []).map((job: any) => ({
-        id: job.id,
-        ticker: job.ticker,
-        companyName: job.companyName ?? null,
-        overallConclusion: job.overallConclusion ?? null,
-        currentPrice: job.currentPrice ?? null,
-        currency: job.currency ?? null,
-        estimatedCostUsd:
-          typeof job.estimatedCostUsd === 'number' ? job.estimatedCostUsd : null,
-        totalTokens: typeof job.totalTokens === 'number' ? job.totalTokens : null,
-        status: job.status as 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED',
-        createdAt: job.createdAt,
-        completedAt: job.completedAt || null,
-        result: job.result || null,
-        progress: job.progress ?? 0,
-        currentStep: job.currentStep || null,
-        logs: job.logs || null,
-      }));
-      
-      setQueueStatus({
-        jobs: transformedJobs,
-        total: data.total || 0,
-        stats: data.stats || {
-          pending: 0,
-          processing: 0,
-          completed: 0,
-          failed: 0,
-        },
-      });
-    } catch (err) {
-      console.error('Error fetching queue status:', err);
-    }
-  }, []);
-
-  // Poll queue status every 5 seconds
-  useEffect(() => {
-    fetchQueueStatus(); // Initial fetch
-    
-    const interval = setInterval(() => {
-      fetchQueueStatus();
-    }, 5000); // Poll every 5 seconds
-
-    return () => clearInterval(interval);
-  }, [fetchQueueStatus]);
 
   // Handle form submission
   const handleSubmit = useCallback(async (e: React.FormEvent) => {
@@ -130,10 +61,7 @@ export const BatchQueuePage: React.FC<BatchQueuePageProps> = ({ language }) => {
       // Clear input
       setTickersInput('');
       
-      // Refresh queue status
-      setTimeout(() => {
-        fetchQueueStatus();
-      }, 1000);
+      void onRefreshHistory?.();
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Failed to submit batch job';
       setError(errorMessage);
@@ -141,7 +69,7 @@ export const BatchQueuePage: React.FC<BatchQueuePageProps> = ({ language }) => {
     } finally {
       setIsSubmitting(false);
     }
-  }, [tickersInput, language, submitBatchJob, fetchQueueStatus]);
+  }, [tickersInput, language, submitBatchJob, onRefreshHistory]);
 
   // Format date/time
   const formatDateTime = (dateString: string | null) => {
@@ -193,7 +121,7 @@ export const BatchQueuePage: React.FC<BatchQueuePageProps> = ({ language }) => {
     }
   };
 
-  const formatPrice = (job: QueueJob) => {
+  const formatPrice = (job: QueueJobItem) => {
     if (!job.currentPrice || job.currentPrice === '0.00') return '-';
     const inferCurrencyCode = () => {
       const rawCurrency = (job.currency || '').trim();
@@ -238,7 +166,7 @@ export const BatchQueuePage: React.FC<BatchQueuePageProps> = ({ language }) => {
     return job.currentPrice;
   };
 
-  const getConclusionTag = (job: QueueJob): {
+  const getConclusionTag = (job: QueueJobItem): {
     label: string;
     className: string;
   } | null => {
@@ -282,7 +210,7 @@ export const BatchQueuePage: React.FC<BatchQueuePageProps> = ({ language }) => {
     };
   };
 
-  const formatEstimatedCost = (job: QueueJob) => {
+  const formatEstimatedCost = (job: QueueJobItem) => {
     if (typeof job.estimatedCostUsd !== 'number' || !Number.isFinite(job.estimatedCostUsd)) {
       return '-';
     }
@@ -292,14 +220,54 @@ export const BatchQueuePage: React.FC<BatchQueuePageProps> = ({ language }) => {
     return `$${job.estimatedCostUsd.toFixed(4)}`;
   };
 
-  // Load report (set analysis state from result)
-  const handleLoadReport = useCallback((job: QueueJob) => {
-    if (job.result) {
-      // Store result in localStorage and reload page to show it
-      localStorage.setItem('intelligentStockAgentActiveState', JSON.stringify(job.result));
-      window.location.reload();
-    }
-  }, []);
+  const handleLoadReport = useCallback(
+    async (job: QueueJobItem) => {
+      if (!onLoadReport) return;
+      setLoadingReportId(job.id);
+      try {
+        const response = await apiFetch(`/api/jobs/${job.id}`);
+        if (!response.ok) {
+          throw new Error(language === 'cn' ? '无法加载报告' : 'Failed to load report');
+        }
+        const data = await response.json();
+        if (!data.result) {
+          throw new Error(language === 'cn' ? '报告数据为空' : 'Report payload is empty');
+        }
+        onLoadReport({
+          id: job.id,
+          result: { ...(data.result as AnalysisState), id: job.id },
+        });
+      } catch (err) {
+        console.error('Error loading batch report:', err);
+        setError(
+          err instanceof Error ? err.message : language === 'cn' ? '加载报告失败' : 'Failed to load report'
+        );
+      } finally {
+        setLoadingReportId(null);
+      }
+    },
+    [onLoadReport, language]
+  );
+
+  const handleRetryJob = useCallback(
+    async (job: QueueJobItem) => {
+      if (!retryFailedJob) return;
+      setRetryingJobId(job.id);
+      setError(null);
+      try {
+        await retryFailedJob(job.id);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Failed to retry job';
+        setError(message);
+      } finally {
+        setRetryingJobId(null);
+      }
+    },
+    [retryFailedJob]
+  );
+
+  const canResumeJob = (job: QueueJobItem) =>
+    job.status === 'FAILED' && Boolean(job.hasCheckpoint);
 
   return (
     <div className="max-w-6xl mx-auto py-8 fade-in">
@@ -335,6 +303,9 @@ export const BatchQueuePage: React.FC<BatchQueuePageProps> = ({ language }) => {
           {error && (
             <div className="mt-2 text-red-400 text-sm">{error}</div>
           )}
+          {queueFetchError && (
+            <div className="mt-2 text-amber-400 text-sm">{queueFetchError}</div>
+          )}
           <div className="mt-4">
             <button
               type="submit"
@@ -353,9 +324,18 @@ export const BatchQueuePage: React.FC<BatchQueuePageProps> = ({ language }) => {
       {/* Live Dashboard */}
       <div className="bg-gray-800 rounded-lg p-6">
         <div className="flex justify-between items-center mb-6">
-          <h2 className="text-xl font-semibold">
-            {language === 'en' ? 'Queue Dashboard' : '队列仪表板'}
-          </h2>
+          <div className="flex items-center gap-3">
+            <h2 className="text-xl font-semibold">
+              {language === 'en' ? 'Queue Dashboard' : '队列仪表板'}
+            </h2>
+            <button
+              type="button"
+              onClick={() => void onRefreshQueue()}
+              className="text-sm px-3 py-1 rounded-md bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors"
+            >
+              {language === 'en' ? 'Refresh' : '刷新'}
+            </button>
+          </div>
           <div className="flex gap-4 text-sm">
             <div className="text-center">
               <div className="text-lg font-bold text-yellow-400">{queueStatus?.stats.pending || 0}</div>
@@ -488,7 +468,21 @@ export const BatchQueuePage: React.FC<BatchQueuePageProps> = ({ language }) => {
                           </>
                         )}
                         
-                        {/* Show progress for completed jobs */}
+                        {job.status === 'FAILED' && job.error && (
+                          <div className="text-xs text-red-300/90 truncate" title={job.error}>
+                            {job.error}
+                          </div>
+                        )}
+                        
+                        {/* Show progress for failed jobs that had a checkpoint */}
+                        {job.status === 'FAILED' && (job.progress ?? 0) > 0 && (
+                          <div className="w-full bg-gray-700 rounded-full h-2 overflow-hidden">
+                            <div
+                              className="h-full bg-red-500/70"
+                              style={{ width: `${job.progress}%` }}
+                            />
+                          </div>
+                        )}
                         {job.status === 'COMPLETED' && job.progress !== undefined && job.progress > 0 && (
                           <div className="w-full bg-gray-700 rounded-full h-2 overflow-hidden">
                             <div
@@ -512,12 +506,38 @@ export const BatchQueuePage: React.FC<BatchQueuePageProps> = ({ language }) => {
                       {formatDateTime(job.completedAt)}
                     </td>
                     <td className="py-3 px-2">
-                      {job.status === 'COMPLETED' && job.result ? (
+                      {job.status === 'COMPLETED' ? (
                         <button
-                          onClick={() => handleLoadReport(job)}
-                          className="px-2 py-1 bg-blue-600 hover:bg-blue-700 rounded text-xs text-white transition-colors whitespace-nowrap"
+                          onClick={() => void handleLoadReport(job)}
+                          disabled={loadingReportId === job.id}
+                          className="px-2 py-1 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-wait rounded text-xs text-white transition-colors whitespace-nowrap"
                         >
-                          {language === 'en' ? 'View Report' : '查看报告'}
+                          {loadingReportId === job.id
+                            ? language === 'en'
+                              ? 'Loading...'
+                              : '加载中...'
+                            : language === 'en'
+                              ? 'View Report'
+                              : '查看报告'}
+                        </button>
+                      ) : job.status === 'FAILED' && retryFailedJob ? (
+                        <button
+                          type="button"
+                          onClick={() => void handleRetryJob(job)}
+                          disabled={retryingJobId === job.id}
+                          className="px-2 py-1 bg-amber-600 hover:bg-amber-500 disabled:bg-gray-600 disabled:cursor-wait rounded text-xs text-white transition-colors whitespace-nowrap"
+                        >
+                          {retryingJobId === job.id
+                            ? language === 'en'
+                              ? 'Retrying...'
+                              : '重试中...'
+                            : canResumeJob(job)
+                              ? language === 'en'
+                                ? 'Resume'
+                                : '从中断点继续'
+                              : language === 'en'
+                                ? 'Retry'
+                                : '重试'}
                         </button>
                       ) : (
                         <span className="text-gray-500 text-sm">-</span>
@@ -540,8 +560,8 @@ export const BatchQueuePage: React.FC<BatchQueuePageProps> = ({ language }) => {
         {/* Auto-refresh indicator */}
         <div className="mt-4 text-center text-xs text-gray-500">
           {language === 'en' 
-            ? '🔄 Auto-refreshing every 5 seconds'
-            : '🔄 每 5 秒自动刷新'
+            ? '🔄 Auto-refreshing every 15 seconds · queue list cached while you switch tabs'
+            : '🔄 每 15 秒自动刷新 · 切换标签页后仍保留队列列表'
           }
         </div>
       </div>

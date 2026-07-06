@@ -19,8 +19,66 @@ enum JobStatus {
   FAILED
 }
 
+model EmailVerificationChallenge {
+  id        String   @id @default(uuid())
+  email     String
+  codeHash  String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([email, expiresAt])
+}
+
+model User {
+  id          String   @id
+  email       String   @unique
+  displayName String?
+  avatarUrl   String?
+  isPaid      Boolean  @default(false)
+  paidUntil   DateTime?
+  isAdmin     Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  analysisJobs          AnalysisJob[]
+  comparisonSessions    ComparisonSession[]
+  companyAnalysisUsages CompanyAnalysisUsage[]
+  userEvents            UserEvent[]
+  returnTrackingAnchors ReturnTrackingAnchor[]
+
+  @@index([createdAt])
+}
+
+model CompanyAnalysisUsage {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  usageDate String
+  reportId  String
+  companyId String
+  ticker    String
+  createdAt DateTime @default(now())
+
+  @@unique([userId, reportId, companyId, usageDate])
+  @@index([userId, usageDate])
+}
+
+model UserEvent {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  eventType String
+  path      String?
+  metadata  String?
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([eventType, createdAt])
+}
+
 model BatchJob {
   id          String         @id @default(uuid())
+  userId      String?
   tickers     String         // Comma-separated list of tickers/queries
   status      JobStatus      @default(PENDING)
   language    String         @default("en")
@@ -36,8 +94,89 @@ model BatchJob {
   @@index([createdAt])
 }
 
+model ComparisonSession {
+  id        String          @id @default(uuid())
+  userId    String?
+  user      User?           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  label     String?
+  language  String          @default("cn")
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+  runs      ComparisonRun[]
+
+  @@index([updatedAt])
+  @@index([userId, updatedAt])
+}
+
+enum CompareRunStatus {
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+model ComparisonRun {
+  id              String            @id @default(uuid())
+  sessionId       String
+  session         ComparisonSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  parentRunId     String?
+  parentRun       ComparisonRun?    @relation("CompareRunChain", fields: [parentRunId], references: [id], onDelete: SetNull)
+  childRuns       ComparisonRun[]   @relation("CompareRunChain")
+  createdAt       DateTime          @default(now())
+  status          CompareRunStatus  @default(COMPLETED)
+  progress        Int               @default(100)
+  currentStep     String?
+  error           String?
+  items           String
+  marketHotTopics String
+  result          String
+  digests         String?
+  changeSummary   String?
+
+  @@index([sessionId, createdAt])
+  @@index([parentRunId])
+  @@index([status])
+}
+
+model ReturnTrackingAnchor {
+  id          String   @id @default(uuid())
+  userId      String?
+  user        User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sourceType  String
+  sourceId    String
+  companyKey  String
+  ticker      String
+  exchange    String
+  companyName String?
+  anchorPrice String
+  anchorDate  DateTime
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  snapshots ReturnTrackingSnapshot[]
+
+  @@unique([sourceType, sourceId, companyKey])
+  @@index([sourceType, sourceId])
+  @@index([userId])
+}
+
+model ReturnTrackingSnapshot {
+  id           String               @id @default(uuid())
+  anchorId     String
+  anchor       ReturnTrackingAnchor @relation(fields: [anchorId], references: [id], onDelete: Cascade)
+  observedDate String
+  price        String
+  returnPct    Float
+  createdAt    DateTime             @default(now())
+  updatedAt    DateTime             @updatedAt
+
+  @@unique([anchorId, observedDate])
+  @@index([anchorId, observedDate])
+}
+
 model AnalysisJob {
   id          String    @id @default(uuid())
+  userId      String?
+  user        User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
   batchJobId  String?
   batchJob    BatchJob? @relation(fields: [batchJobId], references: [id], onDelete: Cascade)
   ticker      String
@@ -57,8 +196,11 @@ model AnalysisJob {
   
   // Analysis result data (stored as JSON)
   result      String?   // JSON string of AnalysisState
-  
+  listSummary String?   // Precomputed slim list payload (no Q&A); for fast GET /api/history
+
   @@index([status])
   @@index([createdAt])
   @@index([batchJobId])
+  @@index([userId, completedAt])
+  @@index([userId, status, completedAt])
 }

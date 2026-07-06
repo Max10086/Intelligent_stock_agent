@@ -4,6 +4,9 @@ import { AnalysisState } from '../../types.js';
 import { AnalysisService } from '../services/analysis.js';
 import { LlmCallTelemetry, ModelClient } from '../services/modelClient.js';
 import { updateJobStatus } from './queue.js';
+import { recordCompanyAnalysisUsage } from '../services/usageLimit.js';
+import { invalidateHistoryListCache } from '../routes/history.js';
+import { isCompanyAnalysisComplete } from '../../utils/analysisComplete.js';
 
 // --- Configuration ---
 const MAX_CONCURRENT_JOBS = 2;
@@ -36,13 +39,42 @@ export async function resetStalledJobs() {
   try {
     const { count } = await prisma.analysisJob.updateMany({
       where: { status: 'PROCESSING' },
-      data: { status: 'PENDING', error: 'System restart: Job reset' }
+      data: {
+        status: 'PENDING',
+        error: null,
+        currentStep: 'Recovered after server restart — will resume if checkpoint exists',
+      },
     });
     if (count > 0) {
-      console.log(`🔄 [Recovery] Reset ${count} stalled jobs to PENDING`);
+      console.log(`🔄 [Recovery] Reset ${count} stalled PROCESSING jobs to PENDING`);
     }
   } catch (error) {
     console.error('Failed to reset stalled jobs:', error);
+  }
+}
+
+/** Reset jobs stuck in PROCESSING with no DB heartbeat (e.g. dev hot-reload killed the runner). */
+export async function resetStaleProcessingJobs(maxIdleMs = 3 * 60 * 1000) {
+  try {
+    const cutoff = new Date(Date.now() - maxIdleMs);
+    const { count } = await prisma.analysisJob.updateMany({
+      where: {
+        status: 'PROCESSING',
+        updatedAt: { lt: cutoff },
+      },
+      data: {
+        status: 'PENDING',
+        error: null,
+        currentStep: 'Recovered from stall — will resume if checkpoint exists',
+      },
+    });
+    if (count > 0) {
+      console.log(`🔄 [Recovery] Reset ${count} idle PROCESSING jobs (no update for ${maxIdleMs / 1000}s)`);
+    }
+    return count;
+  } catch (error) {
+    console.error('Failed to reset stale processing jobs:', error);
+    return 0;
   }
 }
 
@@ -53,7 +85,6 @@ async function updateJobProgress(jobId: string, percent: number, message: string
     await updateJobStatus(jobId, {
       progress: percent,
       currentStep: message,
-      logs: [logMessage],
     });
   } catch (error) {
     console.error(`Error updating job progress for ${jobId}:`, error);
@@ -65,7 +96,11 @@ export async function runDeepResearch(
   query: string,
   language: string = 'en',
   jobId?: string,
-  onProgress?: (message: string) => void | Promise<void>
+  onProgress?: (message: string) => void | Promise<void>,
+  options?: {
+    resumeFrom?: AnalysisState | null;
+    onCheckpoint?: (state: AnalysisState) => void | Promise<void>;
+  }
 ): Promise<AnalysisState> {
   const telemetry: LlmCallTelemetry[] = [];
   const analysisService = new AnalysisService(
@@ -78,7 +113,16 @@ export async function runDeepResearch(
     if (onProgress) await onProgress(message);
   };
 
-  const result = await analysisService.runFullAnalysis(query, language as 'en' | 'cn', progressCallback);
+  const result = await analysisService.runFullAnalysis(
+    query,
+    language as 'en' | 'cn',
+    progressCallback,
+    {
+      analyzeCandidates: false,
+      resumeFrom: options?.resumeFrom ?? null,
+      onCheckpoint: options?.onCheckpoint,
+    }
+  );
   return {
     ...result,
     llmTelemetry: telemetry,
@@ -119,6 +163,8 @@ async function claimNextJob() {
 
 export async function processNextJob(): Promise<void> {
   try {
+    await resetStaleProcessingJobs();
+
     const jobToProcess = await claimNextJob();
 
     if (!jobToProcess) {
@@ -133,35 +179,88 @@ export async function processNextJob(): Promise<void> {
     
     try {
       await updateJobProgress(jobId, 5, 'Initializing Analysis...');
-      
-      const result = await runDeepResearch(
+
+      let resumeFrom: AnalysisState | null = null;
+      if (jobToProcess.result) {
+        try {
+          resumeFrom = JSON.parse(jobToProcess.result) as AnalysisState;
+        } catch {
+          resumeFrom = null;
+        }
+      }
+
+      const rawResult = await runDeepResearch(
         jobToProcess.ticker,
         jobToProcess.query,
         jobToProcess.language,
-        jobId
+        jobId,
+        undefined,
+        {
+          resumeFrom,
+          onCheckpoint: async partial => {
+            await updateJobStatus(jobId, {
+              result: { ...partial, id: jobId },
+              progress: partial.currentProgress ?? undefined,
+            });
+          },
+        }
       );
+
+      const result: AnalysisState = {
+        ...rawResult,
+        id: jobId,
+        clientSessionId: rawResult.id,
+      };
 
       await updateJobStatus(jobId, {
         status: 'COMPLETED',
         completedAt: new Date(),
-        result: result,
+        result,
         error: null,
         progress: 100,
-        currentStep: 'Analysis Complete'
+        currentStep:
+          result.status === 'partial' ? 'Focus Analysis Complete' : 'Analysis Complete',
       });
+
+      if (jobToProcess.userId) {
+        const reportId = jobId;
+        const companies = [
+          result.focusCompany,
+          ...(result.candidateCompanies || []),
+        ].filter(Boolean);
+        for (const company of companies) {
+          if (!company || !isCompanyAnalysisComplete(company)) continue;
+          try {
+            await recordCompanyAnalysisUsage({
+              userId: jobToProcess.userId,
+              reportId,
+              companyId: company.id,
+              ticker: company.profile.ticker,
+            });
+          } catch (usageError) {
+            console.warn(`[batch] usage record failed for ${company.profile.ticker}:`, usageError);
+          }
+        }
+        invalidateHistoryListCache(jobToProcess.userId);
+      }
 
       console.log(`✅ Job ${jobId} Completed.`);
 
     } catch (error: any) {
       const errorMessage = error?.message || String(error);
       console.error(`❌ Job ${jobId} Failed:`, errorMessage);
-      
+
+      const latest = await prisma.analysisJob.findUnique({
+        where: { id: jobId },
+        select: { progress: true, currentStep: true },
+      });
+
       await updateJobStatus(jobId, {
         status: 'FAILED',
         completedAt: new Date(),
         error: errorMessage,
-        progress: 0,
-        currentStep: 'Failed'
+        progress: latest?.progress ?? undefined,
+        currentStep: `Failed: ${errorMessage}`,
       });
     } finally {
       // 递归循环：任务结束后，立即尝试启动下一个

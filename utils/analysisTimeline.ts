@@ -71,7 +71,7 @@ export const buildTickerHistoryGroups = (
   history: AnalysisState[],
   lang: Language
 ): TickerHistoryGroup[] => {
-  const dedupedHistory = dedupeHistoryBySession(history);
+  const dedupedHistory = dedupeHistoryByJobId(history);
   const byTicker = new Map<
     string,
     { name: string; exchange: string; raw: TickerTimelineEntry[] }
@@ -240,6 +240,24 @@ export const truncateConclusion = (text: string | undefined, max = 48): string =
   if (!cleaned) return '';
   if (cleaned.length <= max) return cleaned;
   return `${cleaned.slice(0, max)}…`;
+};
+
+/** Collapse duplicate rows for the same saved job id (keeps newest by timestamp). */
+export const dedupeHistoryByJobId = (history: AnalysisState[]): AnalysisState[] => {
+  const byId = new Map<string, AnalysisState>();
+
+  for (const item of history) {
+    const key = item.id;
+    if (!key) continue;
+    const existing = byId.get(key);
+    if (!existing || new Date(item.timestamp).getTime() >= new Date(existing.timestamp).getTime()) {
+      byId.set(key, item);
+    }
+  }
+
+  return [...byId.values()].sort(
+    (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+  );
 };
 
 /** Collapse duplicate saves of the same analysis session (keeps newest by timestamp). */

@@ -100,7 +100,8 @@ export const buildFinalConclusionPrompt = (
   outputLanguage: string,
   recencyGuidance: string,
   conclusion: InvestmentConclusion,
-  supplementalQna: CompressibleQnA[] = []
+  supplementalQna: CompressibleQnA[] = [],
+  marketContext?: string
 ): string => {
   const isChinese = /chinese/i.test(outputLanguage);
   const jsonExample = isChinese ? FINAL_CONCLUSION_JSON_EXAMPLE_CN : FINAL_CONCLUSION_JSON_EXAMPLE_EN;
@@ -113,17 +114,19 @@ HARD REQUIREMENTS (must follow exactly):
 - Return ONLY valid JSON. No markdown fences, no commentary, no extra keys.
 - "overall_conclusion" MUST have TWO parts separated by a blank line (use \\n\\n):
   1) First sentence: clear rating (e.g., Strong Buy / Hold / Reduce / Sell).
-  2) Second part: 3-5 sentence executive summary weaving the most critical insights across thesis sections (bull vs bear, valuation vs growth, sentiment vs fundamentals).
+  2) Second part: 3-5 sentence executive summary weaving the most critical insights across thesis sections (bull vs bear, valuation vs growth, sentiment vs fundamentals). **You MUST explicitly incorporate the ExpectationGap section** — if a credible bullish re-rating path exists, state it; do not default to stale consensus framing.
 - "bullet_points" MUST contain 5 to 7 items. An empty array is NOT allowed.
+- At least ONE bullet MUST address the **market expectation gap** (what consensus may still miss from now forward, near-term catalyst, or why current market framing may be wrong).
 - Each bullet MUST have a non-empty "argument" and 2-3 non-empty "evidence" strings.
 - Each evidence item MUST cite specific numbers, dates, periods, or facts from the thesis (and supplemental Q&A digest if provided).
 - When sections conflict (e.g., strong growth vs valuation risk), reflect that tension in the rating.
 - Stay consistent with the thesis below; do not contradict it without citing newer evidence.
+${marketContext ? '- For current price / valuation framing, use the VERIFIED MARKET SNAPSHOT — never cite pre-split or stale web prices as the current level.' : ''}
 
 Required JSON shape (follow this structure exactly):
 ${jsonExample}
 
-Investment thesis (7 sections):
+${marketContext ? `${marketContext}\n\n` : ''}Investment thesis (8 sections — ExpectationGap is critical; do not ignore it when forming the rating):
 ${JSON.stringify(thesisContext)}
 
 ${qnaDigest ? `Supplemental topic-compressed Q&A digest:\n${JSON.stringify(qnaDigest)}\n` : ''}

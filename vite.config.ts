@@ -4,11 +4,8 @@ import react from '@vitejs/plugin-react';
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [react()],
-  // Define global constants to replace in the code
-  define: {
-    // Make process.env available in browser (for compatibility)
-    'process.env': JSON.stringify(process.env),
-  },
+  // Expose NEXT_PUBLIC_* (and VITE_*) to the client via import.meta.env
+  envPrefix: ['VITE_', 'NEXT_PUBLIC_'],
   // Server configuration for development
   server: {
     port: 3000,

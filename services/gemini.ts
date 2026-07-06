@@ -4,6 +4,7 @@
 
 import { QUESTION_GENERATION_BATCH_TIMEOUT_MS } from '../utils/questionGenerationBatches.ts';
 import { ANSWER_QUESTION_TIMEOUT_MS } from '../utils/parallelTasks.ts';
+import { apiFetch } from '../utils/authenticatedFetch.ts';
 
 // In development, Vite proxy handles /api requests
 // In production, use VITE_API_BASE_URL environment variable or default to relative path
@@ -83,7 +84,7 @@ class VertexAIClient {
           const controller = new AbortController();
           const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
           try {
-            return await fetch(`${API_BASE_URL}/api/vertex-ai/generate-content`, {
+            return await apiFetch(`/api/vertex-ai/generate-content`, {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',

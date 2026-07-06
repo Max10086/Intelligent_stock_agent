@@ -97,6 +97,17 @@ const SECTION_EXAMPLES_CN: Record<
       '2026-Q1全球NAND份额前五厂商差距收窄至1%区间，竞争强度随复苏上升。',
     ],
   },
+  ExpectationGap: {
+    summary:
+      '市场仍将闪迪视为"周期Beta存储股"，对其在AI先进封装/HBF等硬科技叙事的定价几乎为零。预期差在于：332层BiCS10与HBF若于2026-H2完成Tier-1验证，估值框架或从周期商品倍数切换至AI基础设施溢价；当前78.4%毛利率与零长期债务提供罕见的安全垫，而100%产能预订与HBF样品进度构成3–6个月内可验证的唤醒催化剂。',
+    evidence: [
+      '[刻板印象] 卖方普遍以NAND ASP周期与commodity倍数定价，对HBF/玻璃基板类硬科技optionality几乎未计价。',
+      '[隐蔽能力] 2026-02合资延期至2034+BiCS10路线图显示59%密度跃升，专利与产线转换进度领先市场认知。',
+      '[赛道共振] AI算力/先进封装对高带宽存储介质需求刚性，HBF样品2026-H2交付是切入数万亿TAM的关键验证节点。',
+      '[安全垫] 2026-Q1 FCF近30亿美元、零长期债务，即便新叙事延迟，下行空间有限。',
+      '[催化剂] 跟踪2026-H2 HBF客户Qual结果、BiCS10量产良率及Tier-1 CSP/design-in公告。',
+    ],
+  },
 };
 
 const SECTION_EXAMPLES_EN: Record<
@@ -175,6 +186,17 @@ const SECTION_EXAMPLES_EN: Record<
       '2026-Q1 top-five NAND vendors clustered within a 1% revenue-share band as competition intensifies with recovery.',
     ],
   },
+  ExpectationGap: {
+    summary:
+      'The market still prices SanDisk as a cyclical NAND beta with near-zero credit for AI/advanced-packaging/HBF optionality. The bullish expectation gap: if 332-layer BiCS10 and HBF pass Tier-1 validation in 2026-H2, multiples could re-rate from commodity cycle to AI-infrastructure; 78.4% GM and zero net debt provide a rare floor while 100% bookings and HBF sampling are verifiable 3–6 month awakening catalysts.',
+    evidence: [
+      '[Stereotype] Consensus uses NAND ASP cycle/commodity multiples; little value ascribed to HBF/hard-tech narrative.',
+      '[Hidden capability] Feb-2026 JV extension to 2034 + BiCS10 +59% density roadmap ahead of market perception.',
+      '[Theme resonance] AI compute/advanced packaging needs high-bandwidth memory media; 2026-H2 HBF samples are the TAM entry proof point.',
+      '[Safety floor] ~$3B quarterly FCF and zero long-term debt limit downside if narrative delays.',
+      '[Catalyst] Track 2026-H2 HBF qual results, BiCS10 yield ramp, Tier-1 CSP/design-in announcements.',
+    ],
+  },
 };
 
 export const THESIS_SECTION_KEYS = [
@@ -185,6 +207,7 @@ export const THESIS_SECTION_KEYS = [
   'OutlookRisks',
   'MarketSentiment',
   'IndustryCycle',
+  'ExpectationGap',
 ] as const;
 
 export type ThesisSectionKey = (typeof THESIS_SECTION_KEYS)[number];
@@ -213,6 +236,8 @@ const SECTION_GUIDES: Record<ThesisSectionKey, string> = {
     'what is priced in, broker/flow sentiment, earnings surprise vs expectations, catalysts that could re-rate or de-rate the stock',
   IndustryCycle:
     'cycle phase (trough/recovery/expansion/peak), utilization & ASP dynamics, capex/supply pipeline, company positioning vs peers in the cycle',
+  ExpectationGap:
+    'market expectation gap vs current consensus: what the market still misprices or oversimplifies from today forward (next 3–6 months), near-term narrative correction, verifiable milestones/catalysts — synthesize ONLY from expectation-gap Q&A; do NOT rehash already-priced-in past-year events',
 };
 
 export const buildSynthesizeConclusionPrompt = (
@@ -231,7 +256,7 @@ export const buildSynthesizeConclusionPrompt = (
 
 HARD REQUIREMENTS (must follow exactly):
 - Return ONLY valid JSON. No markdown fences, no commentary, no extra keys.
-- Top-level keys MUST be exactly: UpstreamSupplyChain, MarketPosition, BusinessModel, Financials, OutlookRisks, MarketSentiment, IndustryCycle.
+- Top-level keys MUST be exactly: UpstreamSupplyChain, MarketPosition, BusinessModel, Financials, OutlookRisks, MarketSentiment, IndustryCycle, ExpectationGap.
 - Each section MUST contain "summary" AND "evidence" (array of strings).
 - Each section's "evidence" MUST contain 4 to 5 items. Empty arrays are NOT allowed.
 - Each evidence item MUST cite specific numbers, dates, periods (YYYY-Qx / YYYY-MM / FYxxxx), or discrete facts taken directly from the Q&A.
@@ -252,6 +277,13 @@ Section mapping guide:
 - OutlookRisks: ${SECTION_GUIDES.OutlookRisks}
 - MarketSentiment: ${SECTION_GUIDES.MarketSentiment}
 - IndustryCycle: ${SECTION_GUIDES.IndustryCycle}
+- ExpectationGap: ${SECTION_GUIDES.ExpectationGap}
+
+IMPORTANT — ExpectationGap section:
+- Must distill the three market expectation-gap research questions and their answers.
+- Focus on what consensus may still miss **from now forward** (next 3–6 months), not long-past events already priced in.
+- Explicitly contrast [current market framing] vs [near-term verifiable upside or correction].
+- Do NOT recycle generic consensus or rehash last year's news as if it were new alpha.
 
 ${recencyGuidance}
 When evidence conflicts across years, prioritize the latest period and explain differences briefly.
@@ -273,7 +305,8 @@ export const buildSynthesizeSectionPrompt = (
   recencyGuidance: string,
   qna: SynthesizeConclusionQnA[],
   sectionKey: ThesisSectionKey,
-  strictRetry = false
+  strictRetry = false,
+  marketContext?: string
 ): string => {
   const isChinese = /chinese/i.test(outputLanguage);
   const examples = isChinese ? SECTION_EXAMPLES_CN : SECTION_EXAMPLES_EN;
@@ -300,6 +333,7 @@ HARD REQUIREMENTS (must follow exactly):
 - Each evidence item MUST cite specific numbers, dates, periods, or discrete facts from the Q&A.
 - Do NOT leave "evidence" empty.
 - Use facts for "${companyName}" only — the JSON example below shows desired depth/style, not content to copy.
+${marketContext ? '- For stock price / valuation / sentiment at current levels, use the VERIFIED MARKET SNAPSHOT — reject stale pre-split or historical prices as "current".' : ''}
 
 ${writingRules}
 
@@ -308,7 +342,7 @@ Focus for this section: ${SECTION_GUIDES[sectionKey]}
 Required JSON shape (match this depth):
 ${jsonExample}
 
-${recencyGuidance}
+${marketContext ? `${marketContext}\n\n` : ''}${recencyGuidance}
 When evidence conflicts across years, prioritize the latest period.
 
 Q&A Context (topic-filtered & fact-compressed): ${JSON.stringify(qnaPayload)}`;

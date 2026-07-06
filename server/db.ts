@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { PrismaClient } from '@prisma/client';
+import { AsyncSemaphore } from '../utils/asyncSemaphore.js';
 
 const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClient | undefined;
@@ -34,15 +35,19 @@ function buildDatabaseUrl(rawUrl: string | undefined): string | undefined {
       parsed.searchParams.set('connection_limit', process.env.PRISMA_CONNECTION_LIMIT || '1');
       parsed.searchParams.set('pool_timeout', process.env.PRISMA_POOL_TIMEOUT || '20');
       parsed.searchParams.set('statement_cache_size', '0');
+      parsed.searchParams.set('socket_timeout', process.env.PRISMA_SOCKET_TIMEOUT_SECONDS || '35');
     } else {
       parsed.searchParams.set('connect_timeout', process.env.PRISMA_CONNECT_TIMEOUT || '30');
-      // Keep dev pool small to avoid exhausting Supabase session limits after HMR restarts.
-      const defaultLimit = process.env.NODE_ENV !== 'production' ? '1' : '5';
+      // Dev needs >1 connection: login sync, analytics, and history load run concurrently.
+      const defaultLimit = process.env.NODE_ENV !== 'production' ? '3' : '5';
       if (!parsed.searchParams.has('connection_limit')) {
         parsed.searchParams.set('connection_limit', process.env.PRISMA_CONNECTION_LIMIT || defaultLimit);
       }
       if (!parsed.searchParams.has('pool_timeout')) {
         parsed.searchParams.set('pool_timeout', process.env.PRISMA_POOL_TIMEOUT || (process.env.NODE_ENV !== 'production' ? '10' : '20'));
+      }
+      if (!parsed.searchParams.has('socket_timeout')) {
+        parsed.searchParams.set('socket_timeout', process.env.PRISMA_SOCKET_TIMEOUT_SECONDS || '35');
       }
     }
     return parsed.toString();
@@ -106,35 +111,44 @@ export const prisma: PrismaClient = new Proxy({} as PrismaClient, {
   },
 });
 
+/** Cap in-flight Prisma queries below connection_limit to avoid P2024 pool timeouts. */
+const DB_QUERY_CONCURRENCY = Math.max(
+  1,
+  Number(process.env.PRISMA_DB_CONCURRENCY || (process.env.NODE_ENV !== 'production' ? '2' : '4'))
+);
+const dbQuerySemaphore = new AsyncSemaphore(DB_QUERY_CONCURRENCY);
+
 const POOL_RESET_PATTERN = /connection pool|P2024|ECHECKOUTTIMEOUT|too many clients/i;
 
 const RETRYABLE_DB_PATTERN =
-  /ECHECKOUTTIMEOUT|P1017|P1001|P1008|P2024|connection|pool|closed|timeout/i;
+  /ECHECKOUTTIMEOUT|P1017|P1001|P1008|P2024|connection|pool|closed|timeout|engine was empty|empty response/i;
 
 export async function withPrismaRetry<T>(
   operation: () => Promise<T>,
   label = 'db',
   maxAttempts = 3
 ): Promise<T> {
-  let lastError: unknown;
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    try {
-      return await operation();
-    } catch (error) {
-      lastError = error;
-      const message = error instanceof Error ? error.message : String(error);
-      const retryable = RETRYABLE_DB_PATTERN.test(message);
-      if (!retryable || attempt === maxAttempts) {
-        throw error;
+  return dbQuerySemaphore.run(async () => {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        return await operation();
+      } catch (error) {
+        lastError = error;
+        const message = error instanceof Error ? error.message : String(error);
+        const retryable = RETRYABLE_DB_PATTERN.test(message);
+        if (!retryable || attempt === maxAttempts) {
+          throw error;
+        }
+        console.warn(`[Prisma] ${label} failed (attempt ${attempt}/${maxAttempts}): ${message}`);
+        if (POOL_RESET_PATTERN.test(message) || /engine was empty|empty response/i.test(message)) {
+          await resetPrismaConnection();
+        }
+        await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
       }
-      console.warn(`[Prisma] ${label} failed (attempt ${attempt}/${maxAttempts}): ${message}`);
-      if (POOL_RESET_PATTERN.test(message)) {
-        await resetPrismaConnection();
-      }
-      await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
     }
-  }
-  throw lastError;
+    throw lastError;
+  });
 }
 
 export async function checkDatabaseHealth(): Promise<{

@@ -1,5 +1,7 @@
-import { prisma } from '../db.js';
+import { prisma, withPrismaRetry } from '../db.js';
 import { JobStatus } from '@prisma/client';
+import type { AnalysisState } from '../../types.js';
+import { buildHistoryListSummary } from '../../utils/historyListSummary.js';
 
 /**
  * Queue Management Actions
@@ -9,6 +11,7 @@ import { JobStatus } from '@prisma/client';
 
 export interface QueueJob {
   id: string;
+  userId?: string | null;
   ticker: string;
   companyName?: string | null;
   overallConclusion?: string | null;
@@ -28,8 +31,59 @@ export interface QueueJob {
   batchJobId?: string | null;
   progress?: number;
   currentStep?: string | null;
+  hasCheckpoint?: boolean;
   logs?: string[] | null;
 }
+
+function parseListSummary(summary: string | null | undefined): AnalysisState | null {
+  if (!summary) return null;
+  try {
+    return JSON.parse(summary) as AnalysisState;
+  } catch {
+    return null;
+  }
+}
+
+function hasResumeCheckpoint(summary: AnalysisState | null): boolean {
+  const focus = summary?.focusCompany;
+  if (!focus) return false;
+  if (focus.conclusion || focus.finalConclusion) return true;
+  const qnaLen = Array.isArray(focus.qna) ? focus.qna.length : 0;
+  const qLen = Array.isArray(focus.questions) ? focus.questions.length : 0;
+  return qnaLen > 0 && (qLen === 0 || qnaLen >= qLen);
+}
+
+function buildStatsFromGroup(
+  rows: Array<{ status: JobStatus; _count: { _all: number } }>
+): QueueStatus['stats'] {
+  const count = (status: JobStatus) =>
+    rows.find(row => row.status === status)?._count._all ?? 0;
+  return {
+    pending: count('PENDING'),
+    processing: count('PROCESSING'),
+    completed: count('COMPLETED'),
+    failed: count('FAILED'),
+  };
+}
+
+const QUEUE_LIST_SELECT = {
+  id: true,
+  userId: true,
+  ticker: true,
+  query: true,
+  language: true,
+  status: true,
+  progress: true,
+  currentStep: true,
+  logs: true,
+  createdAt: true,
+  updatedAt: true,
+  startedAt: true,
+  completedAt: true,
+  error: true,
+  batchJobId: true,
+  listSummary: true,
+} as const;
 
 function extractJobSummary(result: any): {
   companyName: string | null;
@@ -107,7 +161,8 @@ export interface QueueStatus {
 export async function addToQueue(
   tickers: string[],
   language: string = 'en',
-  batchJobId?: string
+  batchJobId?: string,
+  userId?: string
 ): Promise<{ jobIds: string[]; jobs: QueueJob[] }> {
   if (!tickers || tickers.length === 0) {
     throw new Error('At least one ticker is required');
@@ -129,6 +184,7 @@ export async function addToQueue(
         prisma.analysisJob.create({
           data: {
             batchJobId: batchJobId || null,
+            userId: userId || null,
             ticker,
             query: ticker,
             language,
@@ -145,6 +201,7 @@ export async function addToQueue(
 
       return {
         id: job.id,
+        userId: job.userId,
         ticker: job.ticker,
         companyName,
         overallConclusion,
@@ -162,6 +219,8 @@ export async function addToQueue(
         result: parsedResult,
         reportId: null, // Can be added later if needed
         batchJobId: job.batchJobId || null,
+        progress: job.progress ?? 0,
+        currentStep: job.currentStep ?? null,
       };
     });
 
@@ -188,9 +247,14 @@ export async function getQueueStatus(options?: {
   limit?: number;
   offset?: number;
   batchJobId?: string;
+  userId?: string;
 }): Promise<QueueStatus> {
   try {
     const where: any = {};
+
+    if (options?.userId) {
+      where.userId = options.userId;
+    }
 
     // Filter by status if provided
     if (options?.status) {
@@ -205,32 +269,41 @@ export async function getQueueStatus(options?: {
     const limit = options?.limit || 50;
     const offset = options?.offset || 0;
 
-    // Fetch jobs ordered by createdAt desc
-    const [jobs, total] = await Promise.all([
-      prisma.analysisJob.findMany({
-        where,
-        take: limit,
-        skip: offset,
-        orderBy: { createdAt: 'desc' },
-        include: {
-          batchJob: {
-            select: {
-              id: true,
-              tickers: true,
-            },
-          },
-        },
-      }),
-      prisma.analysisJob.count({ where }),
-    ]);
+    // Sequential: parallel findMany + groupBy doubles pool usage and caused P2024 under load.
+    const jobs = await withPrismaRetry(
+      () =>
+        prisma.analysisJob.findMany({
+          where,
+          take: limit,
+          skip: offset,
+          orderBy: { createdAt: 'desc' },
+          select: QUEUE_LIST_SELECT,
+        }),
+      'queue.list',
+      3
+    );
+    const statusGroups = await withPrismaRetry(
+      () =>
+        prisma.analysisJob.groupBy({
+          by: ['status'],
+          where,
+          _count: { _all: true },
+        }),
+      'queue.stats',
+      2
+    );
 
-    // Transform to QueueJob format
+    const stats = buildStatsFromGroup(statusGroups);
+    const total = statusGroups.reduce((sum, row) => sum + row._count._all, 0);
+
     const queueJobs: QueueJob[] = jobs.map(job => {
-      const parsedResult = job.result ? JSON.parse(job.result) : null;
-      const { companyName, overallConclusion, currentPrice, currency, estimatedCostUsd, totalTokens } = extractJobSummary(parsedResult);
+      const parsedSummary = parseListSummary(job.listSummary);
+      const { companyName, overallConclusion, currentPrice, currency, estimatedCostUsd, totalTokens } =
+        extractJobSummary(parsedSummary);
 
       return {
         id: job.id,
+        userId: job.userId,
         ticker: job.ticker,
         companyName,
         overallConclusion,
@@ -245,22 +318,15 @@ export async function getQueueStatus(options?: {
         startedAt: job.startedAt,
         completedAt: job.completedAt,
         error: job.error,
-        result: parsedResult,
-        reportId: null, // Can be added later if reportId field exists
+        result: null,
+        reportId: null,
         batchJobId: job.batchJobId || null,
         progress: job.progress ?? 0,
         currentStep: job.currentStep ?? null,
+        hasCheckpoint: hasResumeCheckpoint(parsedSummary),
         logs: job.logs ? JSON.parse(job.logs) : null,
       };
     });
-
-    // Calculate statistics
-    const stats = {
-      pending: queueJobs.filter(j => j.status === 'PENDING').length,
-      processing: queueJobs.filter(j => j.status === 'PROCESSING').length,
-      completed: queueJobs.filter(j => j.status === 'COMPLETED').length,
-      failed: queueJobs.filter(j => j.status === 'FAILED').length,
-    };
 
     return {
       jobs: queueJobs,
@@ -302,6 +368,7 @@ export async function getJobById(jobId: string): Promise<QueueJob | null> {
 
     return {
       id: job.id,
+      userId: job.userId,
       ticker: job.ticker,
       companyName,
       overallConclusion,
@@ -327,6 +394,37 @@ export async function getJobById(jobId: string): Promise<QueueJob | null> {
     console.error('Error getting job by ID:', error);
     throw new Error(`Failed to get job: ${error.message}`);
   }
+}
+
+export async function retryFailedJob(jobId: string, userId: string): Promise<QueueJob> {
+  const job = await prisma.analysisJob.findFirst({
+    where: { id: jobId, userId },
+  });
+
+  if (!job) {
+    throw new Error('Job not found');
+  }
+  if (job.status !== 'FAILED') {
+    throw new Error('Only failed jobs can be retried');
+  }
+
+  const hasCheckpoint = Boolean(job.result);
+  await prisma.analysisJob.update({
+    where: { id: jobId },
+    data: {
+      status: 'PENDING',
+      error: null,
+      completedAt: null,
+      startedAt: null,
+      currentStep: hasCheckpoint ? 'Queued — resume from checkpoint' : 'Queued for retry',
+    },
+  });
+
+  const updated = await getJobById(jobId);
+  if (!updated) {
+    throw new Error('Job not found after retry');
+  }
+  return updated;
 }
 
 /**
@@ -359,6 +457,7 @@ export async function updateJobStatus(
     }
     if (updates.result !== undefined) {
       updateData.result = JSON.stringify(updates.result);
+      updateData.listSummary = buildHistoryListSummary(updates.result as AnalysisState);
     }
     if (updates.startedAt !== undefined) {
       updateData.startedAt = updates.startedAt;

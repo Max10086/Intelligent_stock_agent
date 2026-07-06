@@ -26,15 +26,30 @@ import { indexAnsweredQuestions, orderQnaByQuestions, countAnsweredQuestions } f
 import { buildGenerateQuestionsPrompt } from '../../utils/questionGenerationPrompt.js';
 import { generateQuestionsInBatches } from '../../utils/questionGenerationBatches.js';
 import { buildRecencyGuidance } from '../../utils/recencyGuidance.js';
+import { buildAnswerQuestionPrompt, buildVerifiedMarketContext } from '../../utils/marketSnapshot.js';
+import {
+  buildQuickTakeIdentityRule,
+  buildWrongCompanyRetryAppendix,
+  detectWrongCompanyMix,
+} from '../../utils/companyIdentity.js';
+import { formatMarketCapForPrompt } from '../../utils/priceFormat.js';
 import { pickLanguageValidQuestions } from '../../utils/questionLanguage.js';
+import {
+  buildExpectationGapQuestionsPrompt,
+  EXPECTATION_GAP_QUESTION_COUNT,
+  getCoreQuestionCount,
+} from '../../utils/expectationGapPrompt.js';
+import { mergeCoreAndExpectationGapQuestions } from '../../utils/mergeQuestionSets.js';
 import { isUnusableSearchAnswer } from '../../utils/qnaAnswerQuality.js';
 // FIX: 删除了重复引用，保留这一行正确的
 import { searchTicker, getFinancialData } from '../../services/finance.js';
 import {
+  alignConceptDiscoveryByMarket,
   buildFindCompaniesByConceptPrompt,
   buildFindCompetitorsPrompt,
-  parseCompetitorsResponse,
   parseConceptDiscoveryResponse,
+  prioritizeCompetitorsByMarket,
+  runCompetitorDiscovery,
 } from '../../utils/companyDiscovery.js';
 
 // This service contains the analysis logic ported from useStockAgent.ts
@@ -152,7 +167,7 @@ export class AnalysisService {
   }
 
   async findCompetitors(
-    focusCompany: Pick<CompanyProfile, 'name' | 'ticker'>,
+    focusCompany: Pick<CompanyProfile, 'name' | 'ticker' | 'exchange'>,
     lang: Language
   ): Promise<Pick<CompanyProfile, 'name' | 'ticker' | 'exchange'>[]> {
     const outputLanguage = lang === 'cn' ? 'Simplified Chinese' : 'English';
@@ -173,12 +188,14 @@ export class AnalysisService {
       required: ['competitors'],
     };
 
-    const callDiscovery = async (strict: boolean) => {
+    const competitors = await runCompetitorDiscovery(focusCompany, async ({ strictRetry, allowCrossMarket }) => {
       const response = await this.modelClient.generateContent({
         step: 'company_discovery',
         contents: {
           role: 'user',
-          parts: [{ text: buildFindCompetitorsPrompt(focusCompany, outputLanguage, strict) }],
+          parts: [{
+            text: buildFindCompetitorsPrompt(focusCompany, outputLanguage, { strictRetry, allowCrossMarket }),
+          }],
         },
         config: {
           responseMimeType: 'application/json',
@@ -186,22 +203,14 @@ export class AnalysisService {
         },
       });
       return response.text || '';
-    };
+    });
 
-    let competitors = parseCompetitorsResponse(await callDiscovery(false)).filter(
-      c => c.ticker.toUpperCase() !== focusCompany.ticker.toUpperCase()
-    );
-    if (competitors.length === 0) {
-      competitors = parseCompetitorsResponse(await callDiscovery(true)).filter(
-        c => c.ticker.toUpperCase() !== focusCompany.ticker.toUpperCase()
-      );
-    }
     if (competitors.length === 0) {
       console.warn(
         `[company_discovery] no competitors for ${focusCompany.name} (${focusCompany.ticker})`
       );
     }
-    return competitors.slice(0, 2);
+    return competitors;
   }
 
   async findCompaniesByConcept(
@@ -249,13 +258,55 @@ export class AnalysisService {
     if (companies.length === 0) {
       throw new Error('Failed to identify companies from concept.');
     }
-    return companies.slice(0, 3);
+    return alignConceptDiscoveryByMarket(companies);
   }
 
-  async generateQuestions(companyName: string, lang: Language, questionCount: number): Promise<string[]> {
+  async generateExpectationGapQuestions(
+    company: Pick<CompanyProfile, 'name' | 'ticker' | 'exchange'>,
+    lang: Language
+  ): Promise<string[]> {
+    const outputLanguage = lang === 'cn' ? 'Simplified Chinese' : 'English';
+    const recencyGuidance = buildRecencyGuidance(new Date(), lang);
+
+    const callOnce = async (strictLanguageRetry: boolean) => {
+      const prompt = buildExpectationGapQuestionsPrompt(
+        company,
+        outputLanguage,
+        recencyGuidance,
+        strictLanguageRetry
+      );
+      const response = await this.modelClient.generateContent({
+        step: 'question_generation',
+        contents: { role: 'user', parts: [{ text: prompt }] },
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              questions: { type: Type.ARRAY, items: { type: Type.STRING } },
+            },
+            required: ['questions'],
+          },
+        },
+      });
+      const parsed = parseModelJsonResponse(response.text || '{}') as { questions?: string[] };
+      const questions = Array.isArray(parsed.questions) ? parsed.questions : [];
+      return questions.slice(0, EXPECTATION_GAP_QUESTION_COUNT);
+    };
+
+    const raw = await callOnce(false);
+    return pickLanguageValidQuestions(raw, lang, () => callOnce(true), EXPECTATION_GAP_QUESTION_COUNT);
+  }
+
+  async generateQuestions(
+    company: Pick<CompanyProfile, 'name' | 'ticker' | 'exchange'>,
+    lang: Language,
+    questionCount: number
+  ): Promise<string[]> {
     const outputLanguage = lang === 'cn' ? 'Simplified Chinese' : 'English';
     const now = new Date();
     const recencyGuidance = buildRecencyGuidance(now, lang);
+    const coreCount = getCoreQuestionCount(questionCount);
 
     const callBatch = async (
       batchSize: number,
@@ -265,7 +316,7 @@ export class AnalysisService {
       strictLanguageRetry: boolean
     ) => {
       const prompt = buildGenerateQuestionsPrompt(
-        companyName,
+        company,
         outputLanguage,
         batchSize,
         recencyGuidance,
@@ -291,18 +342,21 @@ export class AnalysisService {
       return questions.slice(0, batchSize);
     };
 
-    return generateQuestionsInBatches(questionCount, async (batchSize, batchIndex, batchTotal, priorQuestionCount) => {
+    const standardQuestions = await generateQuestionsInBatches(coreCount, async (batchSize, batchIndex, batchTotal, priorQuestionCount) => {
       const raw = await callBatch(batchSize, batchIndex, batchTotal, priorQuestionCount, false);
       return pickLanguageValidQuestions(raw, lang, () =>
         callBatch(batchSize, batchIndex, batchTotal, priorQuestionCount, true),
         batchSize
       );
     });
+
+    const gapQuestions = await this.generateExpectationGapQuestions(company, lang);
+    return mergeCoreAndExpectationGapQuestions(standardQuestions, gapQuestions, questionCount);
   }
 
   async answerQuestion(
     question: string,
-    companyName: string,
+    company: CompanyProfile,
     lang: Language,
     onProgress?: (message: string) => void | Promise<void>
   ): Promise<QnAResult> {
@@ -314,48 +368,65 @@ export class AnalysisService {
       await onProgress(`Searching web for: ${question.substring(0, 60)}...`);
     }
     
-    const prompt = `As a financial analyst, answer this question about "${companyName}" in ${outputLanguage}: "${question}".
-${buildRecencyGuidance(now, lang)}
-Answer requirements:
-- Use freshest available data first; older data is secondary context only.
-- If the latest filing/period is unavailable, clearly disclose that limitation.
-- For key facts, include period labels (e.g. YYYY-Qx, YYYY annual report, YYYY-MM).
-- Cite sources.`;
+    const basePrompt = buildAnswerQuestionPrompt(
+      question,
+      company,
+      outputLanguage,
+      buildRecencyGuidance(now, lang),
+      lang
+    );
 
-    const response = await this.modelClient.generateContent({
-      step: 'answer_question',
-      contents: { role: 'user', parts: [{ text: prompt }] },
-      config: {
-        tools: [{ googleSearch: {} }],
-      },
-      requireGoogleSearch: true,
-    });
+    const callSearch = async (prompt: string) => {
+      const response = await this.modelClient.generateContent({
+        step: 'answer_question',
+        contents: { role: 'user', parts: [{ text: prompt }] },
+        config: {
+          tools: [{ googleSearch: {} }],
+        },
+        requireGoogleSearch: true,
+      });
+      const sources: GroundingSource[] =
+        response.candidates?.[0]?.groundingMetadata?.groundingChunks
+          ?.map((chunk: any) => chunk.web)
+          .filter(Boolean) ?? [];
+      return { answer: response.text || '', sources };
+    };
 
-    const sources: GroundingSource[] =
-      response.candidates?.[0]?.groundingMetadata?.groundingChunks
-        ?.map((chunk: any) => chunk.web)
-        .filter(Boolean) ?? [];
+    let { answer, sources } = await callSearch(basePrompt);
 
-    // Notify after search completes
     if (onProgress) {
       await onProgress(`Found ${sources.length} sources, synthesizing answer...`);
     }
 
-    // FIX: 增加空值保底
-    const answer = response.text || '';
     if (isUnusableSearchAnswer(answer)) {
       throw new Error(`Search returned no usable evidence for question: ${question.substring(0, 80)}`);
     }
+
+    const mixCheck = detectWrongCompanyMix(answer, company);
+    if (mixCheck.mixed) {
+      console.warn(
+        `[answerQuestion] Possible wrong-company mix for ${company.ticker}: ${mixCheck.reasons.join('; ')}`
+      );
+      const retry = await callSearch(
+        `${basePrompt}${buildWrongCompanyRetryAppendix(company, lang, mixCheck.reasons)}`
+      );
+      if (!isUnusableSearchAnswer(retry.answer)) {
+        answer = retry.answer;
+        sources = retry.sources;
+      }
+    }
+
     return { question, answer, sources };
   }
 
   async synthesizeConclusion(
-    companyName: string,
+    company: CompanyProfile,
     qna: QnAResult[],
     lang: Language
   ): Promise<InvestmentConclusion> {
     const outputLanguage = lang === 'cn' ? 'Simplified Chinese' : 'English';
     const now = new Date();
+    const marketContext = buildVerifiedMarketContext(company, lang);
     const conclusionSectionSchema = {
       type: Type.OBJECT,
       properties: {
@@ -372,10 +443,11 @@ Answer requirements:
     }));
 
     return synthesizeInvestmentConclusionBySections({
-      companyName,
+      companyName: company.name,
       outputLanguage,
       recencyGuidance: buildRecencyGuidance(now, lang),
       qna: qnaPayload,
+      marketContext,
       callSection: async (sectionKey: ThesisSectionKey, prompt: string) => {
         const response = await this.modelClient.generateContent({
           step: 'synthesize_conclusion_section',
@@ -404,20 +476,21 @@ Answer requirements:
   }
 
   async generateFinalConclusion(
-    companyName: string,
+    company: CompanyProfile,
     qna: QnAResult[],
     conclusion: InvestmentConclusion,
     lang: Language
   ): Promise<FinalConclusion> {
     const outputLanguage = lang === 'cn' ? 'Simplified Chinese' : 'English';
     const now = new Date();
+    const marketContext = buildVerifiedMarketContext(company, lang);
 
     const finalConclusionSchema = {
       type: Type.OBJECT,
       properties: {
         overall_conclusion: {
           type: Type.STRING,
-          description: `Rating plus 3-5 sentence executive summary for ${companyName}.`,
+          description: `Rating plus 3-5 sentence executive summary for ${company.name}.`,
         },
         bullet_points: {
           type: Type.ARRAY,
@@ -443,11 +516,12 @@ Answer requirements:
 
     const buildPrompt = (strict: boolean) => {
       const base = buildFinalConclusionPrompt(
-        companyName,
+        company.name,
         outputLanguage,
         buildRecencyGuidance(now, lang),
         conclusion,
-        qna.map(item => ({ question: item.question, answer: item.answer, sources: item.sources }))
+        qna.map(item => ({ question: item.question, answer: item.answer, sources: item.sources })),
+        marketContext
       );
       if (!strict) return base;
       return `${base}\n\n${buildFinalConclusionStrictRetrySuffix()}`;
@@ -470,7 +544,7 @@ Answer requirements:
       finalConclusion = await callModel(true);
     }
     if (!this.hasUsableFinalConclusion(finalConclusion)) {
-      throw new Error(`Failed to generate a usable final investment conclusion for ${companyName}.`);
+      throw new Error(`Failed to generate a usable final investment conclusion for ${company.name}.`);
     }
     return finalConclusion;
   }
@@ -480,13 +554,23 @@ Answer requirements:
     lang: Language
   ): Promise<string> {
     const outputLanguage = lang === 'cn' ? 'Simplified Chinese' : 'English';
+    const marketCapLabel = formatMarketCapForPrompt(company.marketCap, lang, company.currency);
+    const floatMarketCapLabel = formatMarketCapForPrompt(
+      company.floatMarketCap,
+      lang,
+      company.currency
+    );
+    const marketCapRule =
+      lang === 'cn'
+        ? `7) 若提及市值规模，必须原样使用「${marketCapLabel}」，禁止自行换算、缩放或改写数字。`
+        : `7) If mentioning market cap, use exactly "${marketCapLabel}" — do NOT recalculate or rescale.`;
     const prompt = `You are writing a sharp "at-a-glance" company brief in ${outputLanguage}.
 
 Target company:
 - Name: ${company.name}
 - Ticker/Exchange: ${company.ticker} (${company.exchange})
-- Market cap: ${company.marketCap || 'N/A'}
-- Float market cap: ${company.floatMarketCap || 'N/A'}
+- Market cap (verified): ${marketCapLabel}
+- Float market cap (verified): ${floatMarketCapLabel}
 
 Reference writing style (must emulate this level of concreteness and directness):
 "Rocket Lab (RKLB) is the second-largest commercial space company in the U.S. after SpaceX, and a key player in high-frequency small-satellite launches. Its core model is an end-to-end space stack: it not only earns launch revenue, but also manufactures satellites and mission-critical components, offering integrated build+launch services to monetize across the full value chain."
@@ -497,7 +581,9 @@ Hard requirements:
 3) Sentence 2: explain the monetization model concretely (how it makes money, key products/services, value-chain position).
 4) Use concrete industry wording; no generic filler.
 5) Forbidden vague phrases (or their equivalents): "core product and service model", "certain differentiation", "comprehensive conclusion", "etc.".
-6) No markdown, no bullet points, no disclaimer.`;
+6) No markdown, no bullet points, no disclaimer.
+${marketCapRule}
+${buildQuickTakeIdentityRule(company, lang)}`;
 
     const response = await this.modelClient.generateContent({
       step: 'quick_take',
@@ -512,7 +598,8 @@ Hard requirements:
     lang: Language,
     questionCount: number,
     onProgress?: ProgressCallback,
-    existing?: Pick<CompanyAnalysis, 'questions' | 'qna' | 'conclusion' | 'finalConclusion'> | null
+    existing?: Pick<CompanyAnalysis, 'questions' | 'qna' | 'conclusion' | 'finalConclusion'> | null,
+    onCheckpoint?: (partial: Pick<CompanyAnalysis, 'questions' | 'qna' | 'conclusion' | 'finalConclusion'>) => void | Promise<void>
   ): Promise<{ questions: string[]; qna: QnAResult[]; conclusion: InvestmentConclusion; finalConclusion: FinalConclusion }> {
     const log = async (progress: number, step: string, message?: string) => {
       const logMessage = message || step;
@@ -531,7 +618,7 @@ Hard requirements:
     let questions = existingQuestions;
     if (!questions.length) {
       await log(5, 'Deconstructing narrative...', `Analyzing ${company.name} investment thesis`);
-      questions = await this.generateQuestions(company.name, lang, questionCount);
+      questions = await this.generateQuestions(company, lang, questionCount);
       await log(10, 'Questions Generated', `Created ${questions.length} research questions`);
     }
 
@@ -559,7 +646,7 @@ Hard requirements:
 
       await runParallelIndexedTasks<string, QnAResult>(
         pendingTasks,
-        async task => this.answerQuestion(task.item, company.name, lang),
+        async task => this.answerQuestion(task.item, company, lang),
         {
           concurrency: QNA_CONCURRENCY,
           onTaskComplete: async (result, task) => {
@@ -587,15 +674,31 @@ Hard requirements:
 
     let conclusion = existingConclusion;
     if (!conclusion) {
+      if (onCheckpoint) {
+        await onCheckpoint({
+          questions,
+          qna: qnaResults,
+          conclusion: null,
+          finalConclusion: null,
+        });
+      }
       await log(75, 'Synthesizing final report...', 'Analyzing Q&A results and generating investment thesis');
-      conclusion = await this.synthesizeConclusion(company.name, qnaResults, lang);
+      conclusion = await this.synthesizeConclusion(company, qnaResults, lang);
       await log(85, 'Conclusion Synthesized', 'Investment thesis generated');
     }
 
     let finalConclusion = existingFinalConclusion;
     if (!finalConclusion) {
+      if (onCheckpoint && conclusion) {
+        await onCheckpoint({
+          questions,
+          qna: qnaResults,
+          conclusion,
+          finalConclusion: null,
+        });
+      }
       await log(90, 'Generating Final Conclusion', 'Creating executive summary');
-      finalConclusion = await this.generateFinalConclusion(company.name, qnaResults, conclusion, lang);
+      finalConclusion = await this.generateFinalConclusion(company, qnaResults, conclusion, lang);
     }
     await log(100, 'Analysis Complete', `${company.name} analysis finished`);
 
@@ -610,11 +713,40 @@ Hard requirements:
   async runFullAnalysis(
     query: string,
     lang: Language,
-    onProgress?: ProgressCallback
+    onProgress?: ProgressCallback,
+    options?: {
+      analyzeCandidates?: boolean;
+      resumeFrom?: AnalysisState | null;
+      onCheckpoint?: (state: AnalysisState) => void | Promise<void>;
+    }
   ): Promise<AnalysisState> {
+    const analyzeCandidates = options?.analyzeCandidates ?? false;
+    const resume = options?.resumeFrom ?? null;
     const runtimeConfig = getRuntimeModelConfig();
-    const id = Date.now().toString();
-    const timestamp = new Date().toISOString();
+    const id = resume?.id ?? Date.now().toString();
+    const timestamp = resume?.timestamp ?? new Date().toISOString();
+
+    const saveCheckpoint = async (
+      partial: Pick<
+        AnalysisState,
+        'currentProgress' | 'currentStage' | 'focusCompany' | 'candidateCompanies' | 'status'
+      >
+    ) => {
+      if (!options?.onCheckpoint) return;
+      await options.onCheckpoint({
+        id,
+        timestamp,
+        language: lang,
+        query,
+        status: partial.status ?? 'partial',
+        error: null,
+        currentStage: partial.currentStage,
+        currentProgress: partial.currentProgress,
+        focusCompany: partial.focusCompany ?? null,
+        candidateCompanies: partial.candidateCompanies ?? [],
+        stepLogs: resume?.stepLogs ?? [],
+      });
+    };
 
     const log = async (progress: number, step: string, message?: string) => {
       const logMessage = message || step;
@@ -624,79 +756,151 @@ Hard requirements:
       }
     };
 
-    await log(5, 'Starting Analysis', `Query: ${query}`);
+    const resumedFocus = resume?.focusCompany;
+    const canResumeFromProfile = Boolean(resumedFocus?.profile?.ticker);
 
-    // Find companies
-    let companyProfiles: Pick<CompanyProfile, 'name' | 'ticker' | 'exchange'>[] = [];
-
-    await log(10, 'Searching for Companies', `Looking up ticker: ${query}`);
-    const exactMatch = await searchTicker(query);
-
-    if (exactMatch) {
-      await log(15, 'Finding Competitors', `Found exact match: ${exactMatch.name} (${exactMatch.ticker})`);
-      let competitors = await this.findCompetitors(exactMatch, lang);
-      if (competitors.length === 0) {
-        try {
-          const conceptCandidates = await this.findCompaniesByConcept(exactMatch.name, lang);
-          competitors = conceptCandidates
-            .filter(c => c.ticker.toUpperCase() !== exactMatch.ticker.toUpperCase())
-            .slice(0, 2);
-        } catch {
-          // keep empty competitors if fallback discovery also fails
-        }
-      }
-      companyProfiles = [exactMatch, ...competitors];
-      await log(20, 'Competitors Found', `Found ${competitors.length} competitors`);
+    if (canResumeFromProfile) {
+      await log(5, 'Resuming Analysis', `Continuing from checkpoint for ${resumedFocus!.profile.name}`);
     } else {
-      await log(15, 'Searching by Concept', `No exact match found, searching by concept`);
-      try {
-        companyProfiles = await this.findCompaniesByConcept(query, lang);
-      } catch (conceptError) {
-        const fallbackMatch = await searchTicker(query);
-        if (fallbackMatch) {
-          const competitors = await this.findCompetitors(fallbackMatch, lang);
-          companyProfiles = [fallbackMatch, ...competitors];
-        } else {
-          throw conceptError;
+      await log(5, 'Starting Analysis', `Query: ${query}`);
+    }
+
+    let focusProfile: CompanyProfile;
+    let candidateProfiles: CompanyProfile[];
+    let quickTakes: (string | null)[];
+
+    if (canResumeFromProfile) {
+      focusProfile = resumedFocus!.profile;
+      candidateProfiles = (resume?.candidateCompanies || [])
+        .map(c => c.profile)
+        .filter(Boolean) as CompanyProfile[];
+      quickTakes = [
+        resumedFocus!.quickTake ?? null,
+        ...(resume?.candidateCompanies || []).map(c => c.quickTake ?? null),
+      ];
+      await log(55, 'Resuming Focus Company', `${focusProfile.name} (${focusProfile.ticker})`);
+    } else {
+      // Find companies
+      let companyProfiles: Pick<CompanyProfile, 'name' | 'ticker' | 'exchange'>[] = [];
+
+      await log(10, 'Searching for Companies', `Looking up ticker: ${query}`);
+      const exactMatch = await searchTicker(query);
+
+      if (exactMatch) {
+        await log(15, 'Finding Competitors', `Found exact match: ${exactMatch.name} (${exactMatch.ticker})`);
+        let competitors = await this.findCompetitors(exactMatch, lang);
+        if (competitors.length === 0) {
+          try {
+            const conceptCandidates = await this.findCompaniesByConcept(exactMatch.name, lang);
+            competitors = prioritizeCompetitorsByMarket(
+              exactMatch,
+              conceptCandidates.filter(c => c.ticker.toUpperCase() !== exactMatch.ticker.toUpperCase()),
+              2
+            );
+          } catch {
+            // keep empty competitors if fallback discovery also fails
+          }
         }
+        companyProfiles = [exactMatch, ...competitors];
+        await log(20, 'Competitors Found', `Found ${competitors.length} competitors`);
+      } else {
+        await log(15, 'Searching by Concept', `No exact match found, searching by concept`);
+        try {
+          companyProfiles = await this.findCompaniesByConcept(query, lang);
+        } catch (conceptError) {
+          const fallbackMatch = await searchTicker(query);
+          if (fallbackMatch) {
+            const competitors = await this.findCompetitors(fallbackMatch, lang);
+            companyProfiles = [fallbackMatch, ...competitors];
+          } else {
+            throw conceptError;
+          }
+        }
+        await log(20, 'Companies Found', `Found ${companyProfiles.length} companies`);
       }
-      await log(20, 'Companies Found', `Found ${companyProfiles.length} companies`);
+
+      companyProfiles = companyProfiles.filter(c => this.isValidCompanyProfile(c));
+
+      if (companyProfiles.length === 0) {
+        throw new Error("Could not identify any companies for the given query.");
+      }
+
+      await log(25, 'Fetching Financial Data', `Enriching ${companyProfiles.length} company profiles`);
+      const enrichedProfiles = await Promise.all(
+        companyProfiles.map(async (p, index) => {
+          await log(25 + (index + 1) * 5, 'Fetching Financial Data', `${p.name} (${p.ticker})`);
+          return getFinancialData(p);
+        })
+      );
+      await log(50, 'Financial Data Loaded', 'All company profiles enriched');
+
+      focusProfile = enrichedProfiles[0];
+      candidateProfiles = enrichedProfiles.slice(1);
+      await log(52, 'Generating Company Snapshots', 'Creating quick company overviews');
+      quickTakes = await Promise.all(
+        enrichedProfiles.map(async profile => this.generateCompanyQuickTake(profile, lang))
+      );
     }
 
-    companyProfiles = companyProfiles.filter(c => this.isValidCompanyProfile(c));
+    const buildCandidateAnalyses = (): CompanyAnalysis[] =>
+      candidateProfiles.map((profile, i) => {
+        const resumed = resume?.candidateCompanies?.find(c => c.id === profile.ticker);
+        if (resumed) return resumed;
+        return {
+          id: profile.ticker,
+          profile,
+          quickTake: quickTakes[i + 1] || null,
+          status: 'awaiting_user' as const,
+          questions: [],
+          qna: [],
+          conclusion: null,
+          finalConclusion: null,
+          followUpQuestions: [],
+        };
+      });
 
-    if (companyProfiles.length === 0) {
-      throw new Error("Could not identify any companies for the given query.");
-    }
-
-    // Enrich with financial data
-    await log(25, 'Fetching Financial Data', `Enriching ${companyProfiles.length} company profiles`);
-    const enrichedProfiles = await Promise.all(
-      companyProfiles.map(async (p, index) => {
-        await log(25 + (index + 1) * 5, 'Fetching Financial Data', `${p.name} (${p.ticker})`);
-        return getFinancialData(p);
-      })
-    );
-    await log(50, 'Financial Data Loaded', 'All company profiles enriched');
-
-    const focusProfile = enrichedProfiles[0];
-    const candidateProfiles = enrichedProfiles.slice(1);
-    await log(52, 'Generating Company Snapshots', 'Creating quick company overviews');
-    const quickTakes = await Promise.all(
-      enrichedProfiles.map(async (profile) => this.generateCompanyQuickTake(profile, lang))
-    );
+    const focusCheckpointWrapper = async (
+      partial: Pick<CompanyAnalysis, 'questions' | 'qna' | 'conclusion' | 'finalConclusion'>
+    ) => {
+      await saveCheckpoint({
+        status: 'partial',
+        currentProgress: 72,
+        currentStage: 'Generating Final Conclusion',
+        focusCompany: {
+          id: focusProfile.ticker,
+          profile: focusProfile,
+          quickTake: quickTakes[0] || null,
+          status: partial.finalConclusion
+            ? 'complete'
+            : partial.conclusion
+              ? 'synthesizing'
+              : partial.qna?.length
+                ? 'answering_questions'
+                : 'generating_questions',
+          questions: partial.questions,
+          qna: partial.qna,
+          conclusion: partial.conclusion,
+          finalConclusion: partial.finalConclusion,
+          followUpQuestions: [],
+        },
+        candidateCompanies: buildCandidateAnalyses(),
+      });
+    };
 
     // Analyze focus company
-    await log(55, 'Analyzing Focus Company', `${focusProfile.name} (${focusProfile.ticker})`);
+    if (!canResumeFromProfile) {
+      await log(55, 'Analyzing Focus Company', `${focusProfile.name} (${focusProfile.ticker})`);
+    }
     const focusAnalysis = await this.runAnalysisForCompany(
       focusProfile,
       lang,
       runtimeConfig.questions.focus,
       async (progress, step, message) => {
-        // Map company analysis progress (0-80%) to overall progress (55-75%)
         const overallProgress = 55 + Math.floor(progress * 0.2);
         await log(overallProgress, `Focus Company: ${step}`, message);
-      }
+      },
+      canResumeFromProfile ? resumedFocus : null,
+      focusCheckpointWrapper
     );
     
     const focusCompanyAnalysis: CompanyAnalysis = {
@@ -712,50 +916,114 @@ Hard requirements:
     };
     await log(75, 'Focus Company Analysis Complete', `${focusProfile.name}`);
 
-    // Analyze candidate companies
     const candidateAnalyses: CompanyAnalysis[] = [];
-    for (let i = 0; i < candidateProfiles.length; i++) {
-      const profile = candidateProfiles[i];
-      await log(75 + i * 5, 'Analyzing Candidate Company', `${profile.name} (${profile.ticker})`);
-      const analysis = await this.runAnalysisForCompany(
-        profile,
-        lang,
-        runtimeConfig.questions.candidate,
-        async (progress, step, message) => {
-          // Map company analysis progress to overall progress
-          const baseProgress = 75 + i * 5;
-          const overallProgress = baseProgress + Math.floor(progress * 0.05);
-          await log(overallProgress, `Candidate ${i + 1}: ${step}`, message);
-        }
-      );
-      candidateAnalyses.push({
-        id: profile.ticker,
-        profile,
-        quickTake: quickTakes[i + 1] || null,
-        status: 'complete',
-        questions: analysis.questions,
-        qna: analysis.qna,
-        conclusion: analysis.conclusion,
-        finalConclusion: analysis.finalConclusion,
-        followUpQuestions: [],
-      });
-    }
-    await log(95, 'All Companies Analyzed', `Completed analysis for ${enrichedProfiles.length} companies`);
 
+    if (analyzeCandidates) {
+      // Optional full run: analyze every candidate (not used by batch queue — saves tokens)
+      for (let i = 0; i < candidateProfiles.length; i++) {
+        const profile = candidateProfiles[i];
+        await log(75 + i * 5, 'Analyzing Candidate Company', `${profile.name} (${profile.ticker})`);
+        try {
+          const analysis = await this.runAnalysisForCompany(
+            profile,
+            lang,
+            runtimeConfig.questions.candidate,
+            async (progress, step, message) => {
+              const baseProgress = 75 + i * 5;
+              const overallProgress = baseProgress + Math.floor(progress * 0.05);
+              await log(overallProgress, `Candidate ${i + 1}: ${step}`, message);
+            }
+          );
+          candidateAnalyses.push({
+            id: profile.ticker,
+            profile,
+            quickTake: quickTakes[i + 1] || null,
+            status: 'complete',
+            questions: analysis.questions,
+            qna: analysis.qna,
+            conclusion: analysis.conclusion,
+            finalConclusion: analysis.finalConclusion,
+            followUpQuestions: [],
+          });
+        } catch (candidateError) {
+          const message =
+            candidateError instanceof Error ? candidateError.message : String(candidateError);
+          console.error(`Candidate analysis failed for ${profile.name}:`, message);
+          await log(75 + i * 5, 'Candidate Analysis Failed', `${profile.name}: ${message}`);
+          candidateAnalyses.push({
+            id: profile.ticker,
+            profile,
+            quickTake: quickTakes[i + 1] || null,
+            status: 'error',
+            questions: [],
+            qna: [],
+            conclusion: null,
+            finalConclusion: null,
+            followUpQuestions: [],
+            error: message,
+          });
+        }
+      }
+      await log(
+        95,
+        'All Companies Analyzed',
+        `Completed analysis for ${1 + candidateProfiles.length} companies`
+      );
+    } else {
+      for (let i = 0; i < candidateProfiles.length; i++) {
+        const profile = candidateProfiles[i];
+        const resumed = resume?.candidateCompanies?.find(c => c.id === profile.ticker);
+        candidateAnalyses.push(
+          resumed ?? {
+            id: profile.ticker,
+            profile,
+            quickTake: quickTakes[i + 1] || null,
+            status: 'awaiting_user',
+            questions: [],
+            qna: [],
+            conclusion: null,
+            finalConclusion: null,
+            followUpQuestions: [],
+          }
+        );
+      }
+      await log(
+        85,
+        'Candidates Ready',
+        candidateProfiles.length > 0
+          ? `${candidateProfiles.length} competitor(s) await manual analysis`
+          : 'No competitors identified'
+      );
+    }
+
+    const focusComplete = Boolean(focusCompanyAnalysis.finalConclusion);
+    const hasCandidateErrors = candidateAnalyses.some(c => c.status === 'error');
+    const allCandidatesComplete =
+      candidateAnalyses.length === 0 ||
+      candidateAnalyses.every(c => c.status === 'complete');
     const analysisState: AnalysisState = {
       id,
       timestamp,
-      status: 'complete',
+      status:
+        focusComplete && allCandidatesComplete && !hasCandidateErrors
+          ? 'complete'
+          : focusComplete
+            ? 'partial'
+            : 'error',
       language: lang,
       query,
       focusCompany: focusCompanyAnalysis,
       candidateCompanies: candidateAnalyses,
       error: null,
-      currentStage: 'Analysis Complete',
+      currentStage: analyzeCandidates ? 'Analysis Complete' : 'Focus Analysis Complete',
       currentProgress: 100,
     };
 
-    await log(100, 'Analysis Complete', 'Finalizing report');
+    await log(
+      100,
+      analyzeCandidates ? 'Analysis Complete' : 'Focus Analysis Complete',
+      analyzeCandidates ? 'Finalizing report' : 'Focus company report ready'
+    );
     return analysisState;
   }
 }

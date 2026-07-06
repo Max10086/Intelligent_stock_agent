@@ -1,6 +1,7 @@
-import type { FollowUpBaseline, InvestmentConclusion, Language } from '../types.ts';
+import type { FollowUpBaseline, InvestmentConclusion, Language, CompanyProfile } from '../types.ts';
 import { THESIS_SECTION_KEYS } from './synthesizeConclusionPrompt.ts';
 import { formatTopicCompressedQnaDigest } from './qnaTopicCompression.ts';
+import { buildCompanyIdentityBlock, buildSearchDisambiguationBlock } from './companyIdentity.ts';
 import {
   formatBatchDedupHint,
   getCoverageSliceForBatch,
@@ -79,7 +80,7 @@ Always include concrete dates or periods (YYYY-MM or YYYY-Qx) in key claims.`;
 };
 
 export const buildFollowUpQuestionsPrompt = (
-  companyName: string,
+  company: Pick<CompanyProfile, 'name' | 'ticker' | 'exchange'>,
   outputLanguage: string,
   questionCount: number,
   recencyGuidance: string,
@@ -92,7 +93,9 @@ export const buildFollowUpQuestionsPrompt = (
   },
   strictLanguageRetry = false
 ): string => {
+  const companyName = company.name;
   const lang: Language = /chinese/i.test(outputLanguage) ? 'cn' : 'en';
+  const identityBlock = buildCompanyIdentityBlock(company, lang);
   const themes = getFollowUpQuestionThemes(lang);
 
   const batchHeader =
@@ -167,12 +170,18 @@ ${batchThemes.map((t, i) => `${themeRange.start + i}) ${t}`).join('\n')}`
 
   const intro =
     lang === 'cn'
-      ? `${batchHeader}请为「${companyName}」生成恰好 ${questionCount} 个跟进投资研究问题。输出语言：简体中文。
+      ? `${batchHeader}${identityBlock}
+
+请为「${companyName}」（${company.ticker} / ${company.exchange}）生成恰好 ${questionCount} 个跟进投资研究问题。输出语言：简体中文。
+- 所有问题必须明确指向上述唯一公司实体，禁止针对同名/同代码的其他上市公司。
 
 这不是首次深度研究，公司已被分析过。问题须聚焦：自上次分析以来发生了什么变化？在当前新价位/估值下，上次投资论点是否仍然成立？
 
 ${languageRule}`
-      : `${batchHeader}Generate exactly ${questionCount} follow-up investment research questions in English about "${companyName}".
+      : `${batchHeader}${identityBlock}
+
+Generate exactly ${questionCount} follow-up investment research questions in English about "${companyName}" (${company.ticker} / ${company.exchange}).
+- Every question MUST target this exact listed entity only — never a namesake on another exchange.
 
 This is NOT a first-time deep dive. The company was already analyzed. Your questions must focus on WHAT CHANGED since the prior analysis and whether the prior investment thesis still holds at the NEW price/valuation.
 
@@ -199,15 +208,21 @@ ${lang === 'cn' ? '仅返回 JSON：{"questions": ["...", ...]}' : 'Respond ONLY
 
 export const buildFollowUpAnswerPrompt = (
   question: string,
-  companyName: string,
+  company: Pick<CompanyProfile, 'name' | 'ticker' | 'exchange'>,
   outputLanguage: string,
   recencyGuidance: string,
   baseline: FollowUpBaseline
 ): string => {
+  const companyName = company.name;
   const lang: Language = /chinese/i.test(outputLanguage) ? 'cn' : 'en';
+  const disambiguation = buildSearchDisambiguationBlock(company, lang);
 
   if (lang === 'cn') {
-    return `作为金融分析师，请用简体中文回答关于「${companyName}」的以下跟进问题：「${question}」
+    return `${buildCompanyIdentityBlock(company, lang)}
+
+${disambiguation}
+
+作为金融分析师，请用简体中文回答关于「${companyName}」（${company.ticker} / ${company.exchange}）的以下跟进问题：「${question}」
 
 ${formatBaselineContext(baseline, lang)}
 
@@ -218,10 +233,14 @@ ${recencyGuidance}
 - 在相关处将新事实与上次结论对比。
 - 若该主题无实质变化，须明确说明。
 - 关键事实须标注期间（YYYY-Qx、YYYY-MM、FYxxxx）。
-- 引用信息来源。`;
+- 引用信息来源；若来源指向其他同名/同代码公司，必须丢弃。`;
   }
 
-  return `As a financial analyst, answer this FOLLOW-UP question about "${companyName}" in ${outputLanguage}: "${question}"
+  return `${buildCompanyIdentityBlock(company, lang)}
+
+${disambiguation}
+
+As a financial analyst, answer this FOLLOW-UP question about "${companyName}" (${company.ticker} / ${company.exchange}) in ${outputLanguage}: "${question}"
 
 ${formatBaselineContext(baseline, lang)}
 
@@ -232,7 +251,7 @@ Answer requirements:
 - Compare new facts with the prior conclusion when relevant.
 - If nothing material changed on this topic, say so explicitly.
 - Include period labels (YYYY-Qx, YYYY-MM, FYxxxx).
-- Cite sources.`;
+- Cite sources; discard sources about namesakes on other exchanges.`;
 };
 
 export const buildFollowUpPriorContextBlock = (

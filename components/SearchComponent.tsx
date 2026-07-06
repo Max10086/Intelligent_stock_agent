@@ -4,19 +4,21 @@ import { getUIText } from '../constants.ts';
 import { SearchIcon } from './icons.tsx';
 
 interface SearchComponentProps {
-  onSearch: (query: string) => void;
+  onSearch: (query: string) => void | Promise<void>;
   language: Language;
 }
 
 export const SearchComponent: React.FC<SearchComponentProps> = ({ onSearch, language }) => {
   const [query, setQuery] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const uiText = getUIText(language);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (query.trim()) {
-      onSearch(query);
-    }
+    const trimmed = query.trim();
+    if (!trimmed || isSubmitting) return;
+    setIsSubmitting(true);
+    void Promise.resolve(onSearch(trimmed)).finally(() => setIsSubmitting(false));
   };
 
   return (
@@ -43,10 +45,10 @@ export const SearchComponent: React.FC<SearchComponentProps> = ({ onSearch, lang
         <div className="mt-6 flex justify-center">
           <button
             type="submit"
-            disabled={!query.trim()}
-            className="px-8 py-3 text-lg font-semibold text-white bg-blue-600 rounded-md hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-gray-900 focus:ring-blue-500 transition-all transform hover:scale-105"
+            disabled={!query.trim() || isSubmitting}
+            className="px-8 py-3 text-lg font-semibold text-white bg-blue-600 rounded-md hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-gray-900 focus:ring-blue-500 transition-all transform hover:scale-105 disabled:transform-none"
           >
-            {uiText.searchButton}
+            {isSubmitting ? uiText.startingSearch : uiText.searchButton}
           </button>
         </div>
       </form>

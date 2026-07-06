@@ -4,6 +4,7 @@ import 'dotenv/config';
 
 export type ModelProvider = 'vertex' | 'deepseek';
 export type SearchProvider = 'vertex' | 'doubao';
+export type SearchMode = 'standard' | 'advanced';
 
 const toInt = (value: string | undefined, fallback: number) => {
   const parsed = Number.parseInt(value || '', 10);
@@ -45,11 +46,14 @@ export const ANALYSIS_MODEL =
   (ANALYSIS_MODEL_PROVIDER === 'deepseek' ? 'deepseek-v4-pro' : SEARCH_MODEL);
 
 // Question count controls.
-export const FOCUS_QUESTION_COUNT = Math.max(5, toInt(process.env.FOCUS_QUESTION_COUNT, 15));
-export const CANDIDATE_QUESTION_COUNT = Math.max(3, toInt(process.env.CANDIDATE_QUESTION_COUNT, 15));
+export const FOCUS_QUESTION_COUNT = Math.max(5, toInt(process.env.FOCUS_QUESTION_COUNT, 18));
+export const CANDIDATE_QUESTION_COUNT = Math.max(3, toInt(process.env.CANDIDATE_QUESTION_COUNT, 18));
 
 /** Default for detailed Q&A synthesis thinking (override via runtime config UI). */
 export const QNA_THINKING_ENABLED = process.env.QNA_THINKING_ENABLED === 'true';
+
+export const DEFAULT_SEARCH_MODE: SearchMode =
+  process.env.SEARCH_MODE === 'advanced' ? 'advanced' : 'standard';
 
 // DeepSeek OpenAI-compatible endpoint config.
 export const DEEPSEEK_API_KEY = (process.env.DEEPSEEK_API_KEY || '').trim();
@@ -94,6 +98,7 @@ export const ANALYSIS_OUTPUT_COST_PER_MILLION_USD = toFloat(
 
 type RuntimeOverride = {
   search?: { provider?: SearchProvider; model?: string };
+  searchMode?: SearchMode;
   analysis?: { provider?: ModelProvider; model?: string };
   questions?: { focus?: number; candidate?: number };
   qna?: { thinkingEnabled?: boolean };
@@ -114,7 +119,7 @@ const cleanQuestionCount = (value: unknown, min: number): number | undefined => 
   return Math.max(min, Math.floor(value));
 };
 
-/** Bump legacy persisted 10-question defaults when env defaults were raised (e.g. 10 → 15). */
+/** Bump legacy persisted defaults when env defaults were raised (e.g. 10 → 18, 15 → 18). */
 const resolveQuestionCounts = (
   focus: number | undefined,
   candidate: number | undefined
@@ -122,7 +127,11 @@ const resolveQuestionCounts = (
   let resolvedFocus = focus ?? FOCUS_QUESTION_COUNT;
   let resolvedCandidate = candidate ?? CANDIDATE_QUESTION_COUNT;
   if (resolvedFocus === 10 && FOCUS_QUESTION_COUNT > 10) resolvedFocus = FOCUS_QUESTION_COUNT;
+  if (resolvedFocus === 15 && FOCUS_QUESTION_COUNT > 15) resolvedFocus = FOCUS_QUESTION_COUNT;
   if (resolvedCandidate === 10 && CANDIDATE_QUESTION_COUNT > 10) {
+    resolvedCandidate = CANDIDATE_QUESTION_COUNT;
+  }
+  if (resolvedCandidate === 15 && CANDIDATE_QUESTION_COUNT > 15) {
     resolvedCandidate = CANDIDATE_QUESTION_COUNT;
   }
   return {
@@ -147,6 +156,7 @@ function loadPersistedRuntimeOverrides(): RuntimeOverride {
             : undefined,
         model: cleanModel(raw?.search?.model),
       },
+      searchMode: raw?.searchMode === 'advanced' || raw?.searchMode === 'standard' ? raw.searchMode : undefined,
       analysis: {
         provider:
           raw?.analysis?.provider === 'vertex' || raw?.analysis?.provider === 'deepseek'
@@ -163,6 +173,8 @@ function loadPersistedRuntimeOverrides(): RuntimeOverride {
     const migrated =
       raw?.questions?.focus === 10 ||
       raw?.questions?.candidate === 10 ||
+      raw?.questions?.focus === 15 ||
+      raw?.questions?.candidate === 15 ||
       questions.focus !== raw?.questions?.focus ||
       questions.candidate !== raw?.questions?.candidate;
     if (migrated) {
@@ -193,6 +205,7 @@ export const getRuntimeModelConfig = () => ({
       envPinnedSearchProvider || runtimeOverrides.search?.provider || SEARCH_MODEL_PROVIDER,
     model: envPinnedSearchModel || runtimeOverrides.search?.model || SEARCH_MODEL,
   },
+  searchMode: runtimeOverrides.searchMode || DEFAULT_SEARCH_MODE,
   analysis: {
     provider:
       envPinnedAnalysisProvider || runtimeOverrides.analysis?.provider || ANALYSIS_MODEL_PROVIDER,
@@ -224,6 +237,7 @@ function getRuntimeModelConfigFromOverrides(overrides: RuntimeOverride) {
       provider: overrides.search?.provider || SEARCH_MODEL_PROVIDER,
       model: overrides.search?.model || SEARCH_MODEL,
     },
+    searchMode: overrides.searchMode || DEFAULT_SEARCH_MODE,
     analysis: {
       provider: overrides.analysis?.provider || ANALYSIS_MODEL_PROVIDER,
       model: overrides.analysis?.model || ANALYSIS_MODEL,
@@ -250,6 +264,10 @@ export const setRuntimeModelConfig = (override: RuntimeOverride) => {
           : undefined,
       model: cleanModel(override.search?.model),
     },
+    searchMode:
+      override.searchMode === 'advanced' || override.searchMode === 'standard'
+        ? override.searchMode
+        : undefined,
     analysis: {
       provider:
         override.analysis?.provider === 'vertex' || override.analysis?.provider === 'deepseek'
@@ -257,10 +275,10 @@ export const setRuntimeModelConfig = (override: RuntimeOverride) => {
           : undefined,
       model: cleanModel(override.analysis?.model),
     },
-    questions: {
-      focus: cleanQuestionCount(override.questions?.focus, 5),
-      candidate: cleanQuestionCount(override.questions?.candidate, 3),
-    },
+    questions: resolveQuestionCounts(
+      cleanQuestionCount(override.questions?.focus, 5),
+      cleanQuestionCount(override.questions?.candidate, 3)
+    ),
     qna: {
       thinkingEnabled:
         typeof override.qna?.thinkingEnabled === 'boolean' ? override.qna.thinkingEnabled : undefined,

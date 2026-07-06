@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { Language, RuntimeModelConfig, SearchProvider } from '../types.ts';
+import { Language, RuntimeModelConfig, SearchMode } from '../types.ts';
 import {
+  configForSearchMode,
   pushRuntimeModelConfigToBackend,
   saveStoredRuntimeModelConfig,
 } from '../utils/runtimeModelConfigStorage.ts';
@@ -10,66 +11,68 @@ const API_BASE_URL = typeof window !== 'undefined' ? '' : 'http://localhost:3001
 interface ModelSettingsPanelProps {
   language: Language;
   runtimeModelConfig: RuntimeModelConfig;
-  onConfigReload: () => Promise<RuntimeModelConfig | null>;
+  onConfigApplied: (config: RuntimeModelConfig) => void;
 }
+
+const modeCardClass = (selected: boolean) =>
+  `rounded-lg border p-4 text-left transition-colors ${
+    selected
+      ? 'border-blue-500 bg-blue-950/30 ring-1 ring-blue-500/40'
+      : 'border-gray-700 bg-gray-900/40 hover:border-gray-600'
+  }`;
 
 export const ModelSettingsPanel: React.FC<ModelSettingsPanelProps> = ({
   language,
   runtimeModelConfig,
-  onConfigReload,
+  onConfigApplied,
 }) => {
-  const [analysisProvider, setAnalysisProvider] = useState<'vertex' | 'deepseek'>(runtimeModelConfig.analysis.provider);
-  const [analysisModel, setAnalysisModel] = useState(runtimeModelConfig.analysis.model);
-  const [searchProvider, setSearchProvider] = useState<SearchProvider>(runtimeModelConfig.search.provider);
-  const [searchModel, setSearchModel] = useState(runtimeModelConfig.search.model);
+  const [searchMode, setSearchMode] = useState<SearchMode>(runtimeModelConfig.searchMode || 'standard');
+  const [qnaThinkingEnabled, setQnaThinkingEnabled] = useState(runtimeModelConfig.qna.thinkingEnabled);
   const [focusQuestions, setFocusQuestions] = useState(runtimeModelConfig.questions.focus);
   const [candidateQuestions, setCandidateQuestions] = useState(runtimeModelConfig.questions.candidate);
-  const [qnaThinkingEnabled, setQnaThinkingEnabled] = useState(runtimeModelConfig.qna.thinkingEnabled);
+  const [showExpert, setShowExpert] = useState(false);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [messageType, setMessageType] = useState<'success' | 'error' | 'info'>('info');
   const [isOpen, setIsOpen] = useState(false);
 
   useEffect(() => {
-    setAnalysisProvider(runtimeModelConfig.analysis.provider);
-    setAnalysisModel(runtimeModelConfig.analysis.model);
-    setSearchProvider(runtimeModelConfig.search.provider);
-    setSearchModel(runtimeModelConfig.search.model);
+    setSearchMode(runtimeModelConfig.searchMode || 'standard');
+    setQnaThinkingEnabled(runtimeModelConfig.qna.thinkingEnabled);
     setFocusQuestions(runtimeModelConfig.questions.focus);
     setCandidateQuestions(runtimeModelConfig.questions.candidate);
-    setQnaThinkingEnabled(runtimeModelConfig.qna.thinkingEnabled);
   }, [runtimeModelConfig]);
+
+  const buildPayload = (): RuntimeModelConfig => {
+    const base = configForSearchMode(searchMode);
+    return {
+      ...base,
+      questions: {
+        focus: Math.max(5, Math.floor(focusQuestions || base.questions.focus)),
+        candidate: Math.max(3, Math.floor(candidateQuestions || base.questions.candidate)),
+      },
+      qna: { thinkingEnabled: qnaThinkingEnabled },
+    };
+  };
 
   const handleSave = async () => {
     setSaving(true);
     setMessage(null);
     setMessageType('info');
-    const payload: RuntimeModelConfig = {
-      analysis: {
-        provider: analysisProvider,
-        model: analysisModel.trim(),
-      },
-      search: {
-        provider: searchProvider,
-        model: searchModel.trim(),
-      },
-      questions: {
-        focus: Math.max(5, Math.floor(focusQuestions || 15)),
-        candidate: Math.max(3, Math.floor(candidateQuestions || 15)),
-      },
-      qna: {
-        thinkingEnabled: qnaThinkingEnabled,
-      },
-    };
+    const payload = buildPayload();
 
     try {
-      await pushRuntimeModelConfigToBackend(payload, API_BASE_URL);
-      saveStoredRuntimeModelConfig(payload);
-      await onConfigReload();
+      const saved = await pushRuntimeModelConfigToBackend(payload, API_BASE_URL);
+      saveStoredRuntimeModelConfig(saved);
+      onConfigApplied(saved);
       setMessage(
         language === 'cn'
-          ? `已生效：分析 ${payload.analysis.provider}:${payload.analysis.model}；搜索 ${payload.search.provider}:${payload.search.model}；Q&A Thinking ${payload.qna.thinkingEnabled ? '开' : '关'}`
-          : `Applied: analysis ${payload.analysis.provider}:${payload.analysis.model}; search ${payload.search.provider}:${payload.search.model}; Q&A thinking ${payload.qna.thinkingEnabled ? 'ON' : 'OFF'}`
+          ? searchMode === 'advanced'
+            ? '已切换为高级模式：豆包 + Google 双源搜索（冲突时优先 Google）'
+            : '已切换为标准模式：豆包搜索 + DeepSeek 分析'
+          : searchMode === 'advanced'
+            ? 'Advanced mode enabled: Doubao + Google dual search (Google wins conflicts).'
+            : 'Standard mode enabled: Doubao search + DeepSeek analysis.'
       );
       setMessageType('success');
     } catch (error: any) {
@@ -80,116 +83,141 @@ export const ModelSettingsPanel: React.FC<ModelSettingsPanelProps> = ({
     }
   };
 
-  const searchProviderLabel = searchProvider === 'doubao' ? 'Doubao' : 'Vertex';
+  const modeSummary =
+    searchMode === 'advanced'
+      ? language === 'cn'
+        ? '高级 · 双源搜索'
+        : 'Advanced · dual search'
+      : language === 'cn'
+        ? '标准 · 推荐'
+        : 'Standard · recommended';
 
   return (
     <div className="max-w-6xl mx-auto mb-4 rounded-lg border border-gray-700 bg-gray-800/70">
       <button
         type="button"
         onClick={() => setIsOpen(v => !v)}
-        className="w-full px-4 py-3 text-left text-sm text-gray-200 hover:bg-gray-700/50 flex items-center justify-between"
+        className="w-full px-4 py-3 text-left text-sm text-gray-200 hover:bg-gray-700/50 flex items-center justify-between gap-3"
       >
-        <span>{language === 'cn' ? '高级模型设置' : 'Advanced Model Settings'}</span>
-        <span className="text-xs text-gray-400">
-          A {runtimeModelConfig.analysis.provider}:{runtimeModelConfig.analysis.model} | S {runtimeModelConfig.search.provider}:{runtimeModelConfig.search.model} | Q {runtimeModelConfig.questions.focus}/{runtimeModelConfig.questions.candidate} | Think {runtimeModelConfig.qna.thinkingEnabled ? 'ON' : 'OFF'}
+        <span>{language === 'cn' ? '分析模式' : 'Analysis Mode'}</span>
+        <span className="text-xs text-gray-400 shrink-0">
+          {modeSummary} · DeepSeek · {runtimeModelConfig.questions.focus}/{runtimeModelConfig.questions.candidate}{' '}
+          {language === 'cn' ? '题' : 'Q'}
         </span>
       </button>
 
       {isOpen && (
-        <div className="border-t border-gray-700 p-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-6 gap-3">
-          <label className="text-xs text-gray-300 flex flex-col gap-1">
-            {language === 'cn' ? '分析 Provider' : 'Analysis Provider'}
-            <select
-              value={analysisProvider}
-              onChange={e => setAnalysisProvider(e.target.value as 'vertex' | 'deepseek')}
-              className="bg-gray-900 border border-gray-600 rounded px-2 py-2 text-sm text-white"
+        <div className="border-t border-gray-700 p-4 space-y-4">
+          <p className="text-sm text-gray-400">
+            {language === 'cn'
+              ? '一键选择分析模式。标准模式为系统默认，速度与质量均衡；高级模式在问答搜索时额外启用 Google 搜索，并与豆包结果合并（事实冲突时以 Google 为准）。'
+              : 'Pick a one-click analysis mode. Standard is the default balance of speed and quality. Advanced adds Google Search alongside Doubao for Q&A and merges both (Google wins factual conflicts).'}
+          </p>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <button
+              type="button"
+              className={modeCardClass(searchMode === 'standard')}
+              onClick={() => setSearchMode('standard')}
             >
-              <option value="deepseek">deepseek</option>
-              <option value="vertex">vertex</option>
-            </select>
-          </label>
+              <div className="font-medium text-gray-100">
+                {language === 'cn' ? '标准模式（默认）' : 'Standard (default)'}
+              </div>
+              <ul className="mt-2 text-xs text-gray-400 space-y-1 list-disc list-inside">
+                <li>{language === 'cn' ? '分析：DeepSeek deepseek-v4-pro' : 'Analysis: DeepSeek deepseek-v4-pro'}</li>
+                <li>{language === 'cn' ? '搜索：豆包 Web 搜索' : 'Search: Doubao web search'}</li>
+                <li>{language === 'cn' ? '每家公司 18 道研究问题' : '18 research questions per company'}</li>
+                <li>{language === 'cn' ? '问答 Thinking：关闭（更快）' : 'Q&A thinking: off (faster)'}</li>
+              </ul>
+            </button>
 
-          <label className="text-xs text-gray-300 flex flex-col gap-1">
-            {language === 'cn' ? '分析模型' : 'Analysis Model'}
-            <input
-              value={analysisModel}
-              onChange={e => setAnalysisModel(e.target.value)}
-              className="bg-gray-900 border border-gray-600 rounded px-2 py-2 text-sm text-white"
-              placeholder="deepseek-v4-pro"
-            />
-          </label>
-
-          <label className="text-xs text-gray-300 flex flex-col gap-1">
-            {language === 'cn' ? '搜索 Provider' : 'Search Provider'}
-            <select
-              value={searchProvider}
-              onChange={e => setSearchProvider(e.target.value as SearchProvider)}
-              className="bg-gray-900 border border-gray-600 rounded px-2 py-2 text-sm text-white"
+            <button
+              type="button"
+              className={modeCardClass(searchMode === 'advanced')}
+              onClick={() => setSearchMode('advanced')}
             >
-              <option value="vertex">vertex (Google Search)</option>
-              <option value="doubao">doubao</option>
-            </select>
-          </label>
+              <div className="font-medium text-gray-100">
+                {language === 'cn' ? '高级模式' : 'Advanced mode'}
+              </div>
+              <ul className="mt-2 text-xs text-gray-400 space-y-1 list-disc list-inside">
+                <li>{language === 'cn' ? '继承标准模式的全部分析配置' : 'Same analysis stack as Standard'}</li>
+                <li>
+                  {language === 'cn'
+                    ? '搜索：豆包 + Google 双源，合并后再合成答案'
+                    : 'Search: Doubao + Google merged before synthesis'}
+                </li>
+                <li>
+                  {language === 'cn'
+                    ? '两者冲突时优先采用 Google 搜索结果'
+                    : 'Google results win on factual conflicts'}
+                </li>
+                <li>{language === 'cn' ? '耗时更长，适合高要求深度研究' : 'Slower; best for high-stakes research'}</li>
+              </ul>
+            </button>
+          </div>
 
-          <label className="text-xs text-gray-300 flex flex-col gap-1">
-            {language === 'cn' ? `搜索模型(${searchProviderLabel})` : `Search Model (${searchProviderLabel})`}
-            <input
-              value={searchModel}
-              onChange={e => setSearchModel(e.target.value)}
-              className="bg-gray-900 border border-gray-600 rounded px-2 py-2 text-sm text-white"
-              placeholder={searchProvider === 'doubao' ? 'deepseek-v4-pro' : 'gemini-3-flash-preview'}
-            />
-          </label>
-
-          <label className="text-xs text-gray-300 flex flex-col gap-1">
-            {language === 'cn' ? '目标公司问题数' : 'Focus Questions'}
-            <input
-              type="number"
-              min={5}
-              value={focusQuestions}
-              onChange={e => setFocusQuestions(Number.parseInt(e.target.value || '15', 10))}
-              className="bg-gray-900 border border-gray-600 rounded px-2 py-2 text-sm text-white"
-            />
-          </label>
-
-          <label className="text-xs text-gray-300 flex flex-col gap-1">
-            {language === 'cn' ? '候选公司问题数' : 'Candidate Questions'}
-            <input
-              type="number"
-              min={3}
-              value={candidateQuestions}
-              onChange={e => setCandidateQuestions(Number.parseInt(e.target.value || '15', 10))}
-              className="bg-gray-900 border border-gray-600 rounded px-2 py-2 text-sm text-white"
-            />
-          </label>
-
-          <label className="text-xs text-gray-300 flex flex-col gap-1 md:col-span-2 lg:col-span-3">
-            {language === 'cn' ? '详细问答 Thinking 模式' : 'Detailed Q&A Thinking Mode'}
-            <select
-              value={qnaThinkingEnabled ? 'on' : 'off'}
-              onChange={e => setQnaThinkingEnabled(e.target.value === 'on')}
-              className="bg-gray-900 border border-gray-600 rounded px-2 py-2 text-sm text-white"
+          <div>
+            <button
+              type="button"
+              onClick={() => setShowExpert(v => !v)}
+              className="text-xs text-gray-400 hover:text-gray-200 underline"
             >
-              <option value="off">{language === 'cn' ? '关闭（更快，用于速度对比）' : 'Off (faster — for speed benchmarks)'}</option>
-              <option value="on">{language === 'cn' ? '开启（DeepSeek 思考链，更慢）' : 'On (DeepSeek thinking — slower)'}</option>
-            </select>
-            <span className="text-[11px] text-gray-500 leading-snug">
+              {showExpert
+                ? language === 'cn'
+                  ? '收起专家选项'
+                  : 'Hide expert options'
+                : language === 'cn'
+                  ? '展开专家选项（问题数 / Thinking）'
+                  : 'Show expert options (question counts / thinking)'}
+            </button>
+          </div>
+
+          {showExpert && (
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 rounded-lg border border-gray-700/80 bg-gray-900/30 p-3">
+              <label className="text-xs text-gray-300 flex flex-col gap-1">
+                {language === 'cn' ? '目标公司问题数' : 'Focus questions'}
+                <input
+                  type="number"
+                  min={5}
+                  value={focusQuestions}
+                  onChange={e => setFocusQuestions(Number.parseInt(e.target.value || '18', 10))}
+                  className="bg-gray-900 border border-gray-600 rounded px-2 py-2 text-sm text-white"
+                />
+              </label>
+              <label className="text-xs text-gray-300 flex flex-col gap-1">
+                {language === 'cn' ? '候选公司问题数' : 'Candidate questions'}
+                <input
+                  type="number"
+                  min={3}
+                  value={candidateQuestions}
+                  onChange={e => setCandidateQuestions(Number.parseInt(e.target.value || '18', 10))}
+                  className="bg-gray-900 border border-gray-600 rounded px-2 py-2 text-sm text-white"
+                />
+              </label>
+              <label className="text-xs text-gray-300 flex flex-col gap-1">
+                {language === 'cn' ? '详细问答 Thinking' : 'Q&A thinking'}
+                <select
+                  value={qnaThinkingEnabled ? 'on' : 'off'}
+                  onChange={e => setQnaThinkingEnabled(e.target.value === 'on')}
+                  className="bg-gray-900 border border-gray-600 rounded px-2 py-2 text-sm text-white"
+                >
+                  <option value="off">{language === 'cn' ? '关闭（推荐）' : 'Off (recommended)'}</option>
+                  <option value="on">{language === 'cn' ? '开启（更慢）' : 'On (slower)'}</option>
+                </select>
+              </label>
+            </div>
+          )}
+
+          <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+            <p className="text-xs text-gray-500">
               {language === 'cn'
-                ? '仅控制「搜索 + 合成答案」中 DeepSeek 合成阶段的 thinking，不影响投资论点/最终结论。'
-                : 'Controls DeepSeek thinking during answer synthesis only; thesis/final conclusion steps unchanged.'}
-            </span>
-          </label>
-
-          <div className="md:col-span-2 lg:col-span-6 flex items-center justify-between mt-1">
-            <p className="text-xs text-gray-400">
-              {language === 'cn'
-                ? `搜索问答当前走 ${searchProviderLabel}；保存后写入浏览器并同步后端。`
-                : `Search Q&A uses ${searchProviderLabel}; save persists locally and syncs backend.`}
+                ? `当前选择：${searchMode === 'advanced' ? '高级' : '标准'} · 保存后同步至浏览器与后端`
+                : `Selected: ${searchMode} · Save syncs browser + backend`}
             </p>
             <div className="flex items-center gap-3">
               {message && (
                 <span
-                  className={`text-xs ${
+                  className={`text-xs max-w-md ${
                     messageType === 'success'
                       ? 'text-green-300'
                       : messageType === 'error'
@@ -202,11 +230,17 @@ export const ModelSettingsPanel: React.FC<ModelSettingsPanelProps> = ({
               )}
               <button
                 type="button"
-                onClick={handleSave}
+                onClick={() => void handleSave()}
                 disabled={saving}
-                className="px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 text-sm text-white"
+                className="px-4 py-2 rounded bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 text-sm text-white font-medium"
               >
-                {saving ? (language === 'cn' ? '保存中...' : 'Saving...') : language === 'cn' ? '保存配置' : 'Save'}
+                {saving
+                  ? language === 'cn'
+                    ? '保存中…'
+                    : 'Saving…'
+                  : language === 'cn'
+                    ? '应用模式'
+                    : 'Apply mode'}
               </button>
             </div>
           </div>

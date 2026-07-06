@@ -6,7 +6,7 @@ import { CompanyReport } from './CompanyReport.tsx';
 import { FollowUpSummaryBanner } from './FollowUpSummaryBanner.tsx';
 import { CompanyTimelineStrip } from './CompanyTimelineStrip.tsx';
 import { getUIText } from '../constants.ts';
-import { findIncompleteCompanies } from '../utils/analysisComplete.ts';
+import { findIncompleteCompanies, isCandidateAwaitingUser } from '../utils/analysisComplete.ts';
 import { getFollowUpEligibleCompanies } from '../utils/followUpHelpers.ts';
 import {
   canShowComparisonToggle,
@@ -21,11 +21,13 @@ interface AnalysisComponentProps {
   history: AnalysisState[];
   onRetry?: () => void;
   onFollowUpCompany?: (companyId: string) => void;
+  onStartCandidateAnalysis?: (companyId: string) => void;
   onViewParentReport?: () => void;
   onViewInitialReport?: () => void;
   onLoadReport?: (reportId: string) => void;
   parentReportAvailable?: boolean;
   initialReportAvailable?: boolean;
+  isLoadingReportDetails?: boolean;
 }
 
 export const AnalysisComponent: React.FC<AnalysisComponentProps> = ({
@@ -34,11 +36,13 @@ export const AnalysisComponent: React.FC<AnalysisComponentProps> = ({
   history,
   onRetry,
   onFollowUpCompany,
+  onStartCandidateAnalysis,
   onViewParentReport,
   onViewInitialReport,
   onLoadReport,
   parentReportAvailable = false,
   initialReportAvailable = false,
+  isLoadingReportDetails = false,
 }) => {
   const [activeTab, setActiveTab] = useState<string | null>(analysisState.focusCompany?.id ?? null);
   const [comparisonMode, setComparisonMode] = useState<ComparisonBaselineMode>('previous');
@@ -113,11 +117,21 @@ export const AnalysisComponent: React.FC<AnalysisComponentProps> = ({
   const reportTimestamp = analysisState.timestamp
     ? new Date(analysisState.timestamp).toLocaleString()
     : null;
-  const isCompleteReport = analysisState.status === 'complete';
+  const isCompleteReport = analysisState.status === 'complete' || analysisState.status === 'partial';
   const followUpSourceState = isCompleteReport ? analysisState : null;
+  const isSessionAnalyzing = analysisState.status === 'analyzing';
 
   return (
     <div className="fade-in">
+      {analysisState.status === 'partial' && (
+        <div className="mb-4 p-4 bg-green-900/20 border border-green-600/40 rounded-lg">
+          <p className="text-sm text-green-200">
+            {language === 'cn'
+              ? '核心公司已分析完成并已保存。候选公司仅在您点击「开始分析」后才会消耗 Token。'
+              : 'Focus company is complete and saved. Candidates run only when you click Start Analysis.'}
+          </p>
+        </div>
+      )}
       {analysisState.status === 'complete' && incompleteCompanies.length > 0 && (
         <div className="mb-4 p-4 bg-yellow-900/20 border border-yellow-600/50 rounded-lg">
           <h3 className="text-lg font-bold text-yellow-300">
@@ -219,6 +233,8 @@ export const AnalysisComponent: React.FC<AnalysisComponentProps> = ({
               <CompanyReport
                 companyAnalysis={company}
                 language={language}
+                reportId={analysisState.id}
+                analysisTimestamp={analysisState.timestamp}
                 canFollowUp={
                   Boolean(followUpSourceState) &&
                   getFollowUpEligibleCompanies(followUpSourceState!).some(item => item.id === company.id)
@@ -226,12 +242,25 @@ export const AnalysisComponent: React.FC<AnalysisComponentProps> = ({
                 onFollowUp={
                   onFollowUpCompany ? () => onFollowUpCompany(company.id) : undefined
                 }
+                onStartAnalysis={
+                  onStartCandidateAnalysis && isCandidateAwaitingUser(company)
+                    ? () => onStartCandidateAnalysis(company.id)
+                    : undefined
+                }
+                isCandidateRunning={
+                  isSessionAnalyzing &&
+                  company.status !== 'complete' &&
+                  company.status !== 'awaiting_user' &&
+                  company.status !== 'error' &&
+                  company.id !== analysisState.focusCompany?.id
+                }
                 comparisonBaseline={
                   analysisState.analysisType === 'follow_up'
                     ? baselinesByCompanyId[company.id] ?? null
                     : null
                 }
                 comparisonMode={comparisonMode}
+                isLoadingDetails={isLoadingReportDetails}
               />
             </div>
           ))}

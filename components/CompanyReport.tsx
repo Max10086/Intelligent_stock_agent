@@ -1,10 +1,13 @@
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { CompanyAnalysis, FollowUpBaseline, Language, QnAResult } from '../types.ts';
 import { getUIText } from '../constants.ts';
 import { formatFollowUpDate, formatPriceChangePct } from '../utils/followUpHelpers.ts';
+import { useReturnTracking } from '../hooks/useReturnTracking.ts';
+import { ReturnTrackingPanel } from './ReturnTrackingPanel.tsx';
+import { formatDisplayPrice, formatMarketCapDisplay } from '../utils/priceFormat.ts';
 import type { ComparisonBaselineMode } from '../utils/analysisTimeline.ts';
 import { normalizeDisplayText, mergeBrokenEvidenceFragments } from '../utils/textNormalize.ts';
 import { THESIS_SECTION_KEYS } from '../utils/synthesizeConclusionPrompt.ts';
@@ -13,10 +16,15 @@ import { ChevronDownIcon, LinkIcon, LightBulbIcon, DocumentTextIcon, ChartBarIco
 interface CompanyReportProps {
   companyAnalysis: CompanyAnalysis;
   language: Language;
+  reportId?: string;
+  analysisTimestamp?: string;
   canFollowUp?: boolean;
   onFollowUp?: () => void;
+  onStartAnalysis?: () => void;
+  isCandidateRunning?: boolean;
   comparisonBaseline?: FollowUpBaseline | null;
   comparisonMode?: ComparisonBaselineMode;
+  isLoadingDetails?: boolean;
 }
 
 interface PeriodPoint {
@@ -199,6 +207,7 @@ const ConclusionSection: React.FC<{ title: string; data: { summary: string; evid
         [uiText.conclusion.OutlookRisks]: ShieldExclamationIcon,
         [uiText.conclusion.MarketSentiment]: BrainCircuitIcon,
         [uiText.conclusion.IndustryCycle]: CalendarDaysIcon,
+        [uiText.conclusion.ExpectationGap]: StarIcon,
     };
     const Icon = iconMap[title] || DocumentTextIcon;
 
@@ -224,16 +233,30 @@ const ConclusionSection: React.FC<{ title: string; data: { summary: string; evid
 export const CompanyReport: React.FC<CompanyReportProps> = ({
   companyAnalysis,
   language,
+  reportId,
+  analysisTimestamp,
   canFollowUp = false,
   onFollowUp,
+  onStartAnalysis,
+  isCandidateRunning = false,
   comparisonBaseline = null,
   comparisonMode = 'previous',
+  isLoadingDetails = false,
 }) => {
   const uiText = getUIText(language);
-  const { profile, quickTake, status, qna, conclusion, finalConclusion } = companyAnalysis;
+  const { profile, quickTake, status, qna, conclusion, finalConclusion, error: companyError } = companyAnalysis;
+  const [isLaunching, setIsLaunching] = useState(false);
+  const { recordOpen, getCompanyResult, isLoading: isTrackingLoading } = useReturnTracking();
+  const tracking = getCompanyResult(companyAnalysis.id);
   const freshnessAudit = buildFreshnessAudit(qna);
   const yesLabel = language === 'cn' ? '是' : 'Yes';
   const noLabel = language === 'cn' ? '否' : 'No';
+
+  const handleStartAnalysis = () => {
+    if (!onStartAnalysis || isLaunching || isCandidateRunning) return;
+    setIsLaunching(true);
+    void Promise.resolve(onStartAnalysis()).catch(() => undefined).finally(() => setIsLaunching(false));
+  };
 
   const conclusionSections = conclusion
     ? THESIS_SECTION_KEYS.map(key => ({
@@ -277,32 +300,6 @@ export const CompanyReport: React.FC<CompanyReportProps> = ({
     return parsed.toFixed(2);
   };
 
-  const formatMarketCap = (value?: string, currency?: string) => {
-    if (!value) return 'N/A';
-    const parsed = parseFloat(value.replace(/,/g, ''));
-    if (isNaN(parsed) || parsed <= 0) return 'N/A';
-
-    // Tencent quote market cap fields are typically reported in "hundred millions" (e.g. 633 -> 63.3B).
-    // Convert to absolute currency amount before human-readable formatting.
-    const normalizedAmount = parsed < 1_000_000 ? parsed * 100_000_000 : parsed;
-
-    let display = '';
-    if (normalizedAmount >= 1_000_000_000_000) {
-      display = `${(normalizedAmount / 1_000_000_000_000).toFixed(2)}T`;
-    } else if (normalizedAmount >= 1_000_000_000) {
-      display = `${(normalizedAmount / 1_000_000_000).toFixed(2)}B`;
-    } else if (normalizedAmount >= 1_000_000) {
-      display = `${(normalizedAmount / 1_000_000).toFixed(2)}M`;
-    } else {
-      display = normalizedAmount.toLocaleString('en-US', { maximumFractionDigits: 0 });
-    }
-
-    if (currency && /^[A-Z]{3}$/.test(currency)) {
-      return `${display} ${currency}`;
-    }
-    return display;
-  };
-
   const getDisplayMarketCaps = () => {
     const totalRaw = parseFloat((profile.marketCap || '').replace(/,/g, ''));
     const floatRaw = parseFloat((profile.floatMarketCap || '').replace(/,/g, ''));
@@ -330,9 +327,85 @@ export const CompanyReport: React.FC<CompanyReportProps> = ({
   const priceChange = comparisonBaseline
     ? formatPriceChangePct(comparisonBaseline.price, profile.currentPrice)
     : null;
+  const livePrice = tracking?.currentPrice || profile.currentPrice;
+
+  useEffect(() => {
+    if (!reportId || !analysisTimestamp || !profile.currentPrice) return;
+    void recordOpen({
+      sourceType: 'analysis_report',
+      sourceId: reportId,
+      companies: [
+        {
+          companyKey: companyAnalysis.id,
+          ticker: profile.ticker,
+          exchange: profile.exchange,
+          name: profile.name,
+          anchorPrice: profile.currentPrice,
+          anchorDate: analysisTimestamp,
+        },
+      ],
+    }).catch(error => {
+      console.warn('Failed to record report return tracking:', error);
+    });
+  }, [
+    reportId,
+    analysisTimestamp,
+    companyAnalysis.id,
+    profile.ticker,
+    profile.exchange,
+    profile.name,
+    profile.currentPrice,
+    recordOpen,
+  ]);
 
   return (
     <div className="space-y-8 fade-in">
+      {status === 'awaiting_user' && onStartAnalysis && (
+        <div className="rounded-lg border border-blue-700/40 bg-blue-950/20 p-4 flex flex-wrap items-center justify-between gap-3">
+          <p className="text-sm text-blue-200">{uiText.startCandidateAnalysisHint}</p>
+          <button
+            type="button"
+            onClick={handleStartAnalysis}
+            disabled={isLaunching}
+            className="px-4 py-2 rounded-md bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold disabled:opacity-70 disabled:cursor-not-allowed inline-flex items-center gap-2"
+          >
+            {isLaunching && <span className="spinner w-4 h-4" aria-hidden="true" />}
+            {isLaunching ? uiText.candidateAnalyzing : uiText.startCandidateAnalysis}
+          </button>
+        </div>
+      )}
+
+      {status === 'error' && onStartAnalysis && (
+        <div className="rounded-lg border border-red-700/40 bg-red-950/20 p-4 flex flex-wrap items-center justify-between gap-3">
+          <p className="text-sm text-red-200">
+            {companyError ||
+              (language === 'cn' ? '候选公司分析失败，可重试。' : 'Candidate analysis failed. You can retry.')}
+          </p>
+          <button
+            type="button"
+            onClick={handleStartAnalysis}
+            disabled={isLaunching}
+            className="px-4 py-2 rounded-md bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold disabled:opacity-70 disabled:cursor-not-allowed inline-flex items-center gap-2"
+          >
+            {isLaunching && <span className="spinner w-4 h-4" aria-hidden="true" />}
+            {isLaunching
+              ? uiText.candidateAnalyzing
+              : language === 'cn'
+                ? '重试分析'
+                : 'Retry Analysis'}
+          </button>
+        </div>
+      )}
+
+      {isCandidateRunning && (
+        <div className="text-center py-8 bg-gray-800/40 rounded-lg border border-gray-700">
+          <div className="spinner w-8 h-8 mx-auto"></div>
+          <p className="mt-2 text-gray-400">
+            {language === 'cn' ? '正在分析候选公司…' : 'Analyzing candidate company…'}
+          </p>
+        </div>
+      )}
+
       {canFollowUp && onFollowUp && status === 'complete' && (
         <div className="rounded-lg border border-amber-700/40 bg-amber-950/20 p-4 flex flex-wrap items-center justify-between gap-3">
           <p className="text-sm text-amber-200">
@@ -389,6 +462,20 @@ export const CompanyReport: React.FC<CompanyReportProps> = ({
         </section>
       )}
 
+      {reportId && analysisTimestamp && profile.currentPrice && (
+        <ReturnTrackingPanel
+          language={language}
+          ticker={profile.ticker}
+          exchange={profile.exchange}
+          anchorPrice={tracking?.anchorPrice || profile.currentPrice}
+          anchorDate={tracking?.anchorDate || analysisTimestamp}
+          currentPrice={livePrice}
+          returnPct={tracking?.returnPct}
+          timeline={tracking?.timeline}
+          isLoading={isTrackingLoading && !tracking}
+        />
+      )}
+
       <section className="bg-gray-800 p-6 rounded-lg shadow-lg">
         <h3 className="text-xl font-bold text-white mb-4">{uiText.companyProfile}</h3>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 text-sm">
@@ -404,7 +491,11 @@ export const CompanyReport: React.FC<CompanyReportProps> = ({
           <div className="md:col-span-2 grid grid-cols-2 lg:grid-cols-3 gap-3">
               <div className="rounded-md bg-gray-900/40 p-3 min-h-[84px] flex flex-col justify-between">
                   <p className="text-gray-400 flex items-center gap-1"><CurrencyDollarIcon className="w-4 h-4"/> {uiText.currentPrice}</p>
-                  <p className="text-lg font-semibold text-white">{formatPrice(profile.currentPrice)}</p>
+                  <p className="text-lg font-semibold text-white">
+                    {isTrackingLoading && !tracking
+                      ? '...'
+                      : formatDisplayPrice(livePrice, profile.exchange)}
+                  </p>
               </div>
               <div className="rounded-md bg-gray-900/40 p-3 min-h-[84px] flex flex-col justify-between">
                   <p className="text-gray-400">{uiText.dayChangePct}</p>
@@ -422,11 +513,11 @@ export const CompanyReport: React.FC<CompanyReportProps> = ({
               </div>
               <div className="rounded-md bg-gray-900/40 p-3 min-h-[84px] flex flex-col justify-between">
                   <p className="text-gray-400">{uiText.marketCap}</p>
-                  <p className="text-lg font-semibold text-white">{formatMarketCap(displayCaps.total, profile.currency)}</p>
+                  <p className="text-lg font-semibold text-white">{formatMarketCapDisplay(displayCaps.total, profile.currency)}</p>
               </div>
               <div className="rounded-md bg-gray-900/40 p-3 min-h-[84px] flex flex-col justify-between">
                   <p className="text-gray-400">{uiText.floatMarketCap}</p>
-                  <p className="text-lg font-semibold text-white">{formatMarketCap(displayCaps.float, profile.currency)}</p>
+                  <p className="text-lg font-semibold text-white">{formatMarketCapDisplay(displayCaps.float, profile.currency)}</p>
               </div>
           </div>
         </div>
@@ -518,7 +609,13 @@ export const CompanyReport: React.FC<CompanyReportProps> = ({
         </section>
       )}
 
-      {status !== 'pending' && status !== 'generating_questions' && qna.length === 0 && status !== 'complete' && (
+      {status !== 'pending' &&
+        status !== 'generating_questions' &&
+        status !== 'awaiting_user' &&
+        !isCandidateRunning &&
+        qna.length === 0 &&
+        status !== 'complete' &&
+        status !== 'error' && (
         <div className="text-center py-8">
           <div className="spinner w-8 h-8 mx-auto"></div>
           <p className="mt-2 text-gray-400">Fetching detailed analysis...</p>
@@ -541,6 +638,15 @@ export const CompanyReport: React.FC<CompanyReportProps> = ({
             {language === 'cn'
               ? '分析已完成，但报告内容未能正确加载。请尝试重新分析。'
               : 'Analysis completed, but report content failed to load. Please try running the analysis again.'}
+          </p>
+        </div>
+      )}
+
+      {status === 'complete' && qna.length === 0 && (conclusion || finalConclusion) && isLoadingDetails && (
+        <div className="text-center py-8 border border-blue-500/30 bg-blue-950/20 rounded-lg">
+          <div className="spinner w-8 h-8 mx-auto"></div>
+          <p className="mt-2 text-blue-200 text-sm">
+            {language === 'cn' ? '正在加载问答详情…' : 'Loading Q&A details…'}
           </p>
         </div>
       )}

@@ -2,6 +2,7 @@
 export type Language = 'en' | 'cn';
 export type ModelProvider = 'vertex' | 'deepseek';
 export type SearchProvider = 'vertex' | 'doubao';
+export type SearchMode = 'standard' | 'advanced';
 
 export interface CompanyProfile {
   name: string;
@@ -57,6 +58,7 @@ export interface InvestmentConclusion {
   OutlookRisks: ConclusionSectionData;
   MarketSentiment: ConclusionSectionData;
   IndustryCycle: ConclusionSectionData;
+  ExpectationGap: ConclusionSectionData;
 }
 
 export interface FinalConclusionPoint {
@@ -102,7 +104,14 @@ export interface CompanyAnalysis {
   id: string;
   profile: CompanyProfile;
   quickTake?: string | null;
-  status: 'pending' | 'generating_questions' | 'answering_questions' | 'synthesizing' | 'complete' | 'error';
+  status:
+    | 'awaiting_user'
+    | 'pending'
+    | 'generating_questions'
+    | 'answering_questions'
+    | 'synthesizing'
+    | 'complete'
+    | 'error';
   questions: string[];
   qna: QnAResult[];
   conclusion: InvestmentConclusion | null;
@@ -112,10 +121,21 @@ export interface CompanyAnalysis {
   error?: string | null;
 }
 
+export interface AnalysisStepLog {
+  id: string;
+  companyId: string;
+  companyName: string;
+  step: string;
+  label: string;
+  startedAt: string;
+  endedAt: string;
+  durationMs: number;
+}
+
 export interface AnalysisState {
   id: string;
   timestamp: string;
-  status: 'idle' | 'finding_companies' | 'analyzing' | 'complete' | 'error';
+  status: 'idle' | 'finding_companies' | 'analyzing' | 'partial' | 'complete' | 'error';
   language: Language;
   query: string;
   focusCompany: CompanyAnalysis | null;
@@ -124,6 +144,7 @@ export interface AnalysisState {
   currentStage: string;
   currentProgress: number;
   llmTelemetry?: LlmTelemetryEntry[];
+  stepLogs?: AnalysisStepLog[];
   analysisType?: AnalysisType;
   followUpMeta?: FollowUpMeta;
   /** Client-side session id (AnalysisState.id before DB job id overwrite); used to dedupe duplicate saves. */
@@ -148,6 +169,8 @@ export interface LlmTelemetryEntry {
 export interface RuntimeModelConfig {
   analysis: { provider: ModelProvider; model: string };
   search: { provider: SearchProvider; model: string };
+  /** standard = Doubao search only; advanced = Doubao + Google Search merged before synthesis. */
+  searchMode: SearchMode;
   questions: { focus: number; candidate: number };
   /** DeepSeek thinking for answer_question_synthesis (detailed Q&A prose). */
   qna: { thinkingEnabled: boolean };

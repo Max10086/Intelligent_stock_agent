@@ -1,13 +1,44 @@
 import express from 'express';
-import { prisma, resetPrismaConnection, withPrismaRetry } from '../db.js';
+import { prisma, withPrismaRetry } from '../db.js';
 import { AnalysisState } from '../../types.js';
-import { slimHistoryItem } from '../../utils/historyListSummary.js';
-import { dedupeHistoryBySession } from '../../utils/analysisTimeline.js';
+import { buildHistoryListSummary } from '../../utils/historyListSummary.js';
+import { requireAuth, requireAuthLite } from '../middleware/auth.js';
+import { trackUserEvent } from '../services/analytics.js';
 
 const router = express.Router();
 const HISTORY_LOAD_TIMEOUT_MS = Number(process.env.HISTORY_LOAD_TIMEOUT_MS) || 45_000;
+const HISTORY_CACHE_TTL_MS = Number(process.env.HISTORY_CACHE_TTL_MS) || 120_000;
+const HISTORY_FIRST_PAGE_SIZE = Number(process.env.HISTORY_FIRST_PAGE_SIZE) || 12;
 
-let historyListPromise: Promise<AnalysisState[]> | null = null;
+let historyListPromises = new Map<string, Promise<AnalysisState[]>>();
+const historyListCache = new Map<string, { expiresAt: number; data: AnalysisState[] }>();
+
+export function invalidateHistoryListCache(userId?: string): void {
+  if (userId) {
+    historyListCache.delete(userId);
+    historyListPromises.delete(userId);
+    return;
+  }
+  historyListCache.clear();
+  historyListPromises.clear();
+}
+
+function getCachedHistory(userId: string): AnalysisState[] | null {
+  const entry = historyListCache.get(userId);
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    historyListCache.delete(userId);
+    return null;
+  }
+  return entry.data;
+}
+
+function setCachedHistory(userId: string, data: AnalysisState[]): void {
+  historyListCache.set(userId, {
+    data,
+    expiresAt: Date.now() + HISTORY_CACHE_TTL_MS,
+  });
+}
 
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -61,9 +92,15 @@ function parseSummaryToAnalysisState(
     return {
       ...result,
       id: job.id,
-      clientSessionId: typeof result.id === 'string' ? result.id : job.id,
+      clientSessionId:
+        (typeof result.clientSessionId === 'string' && result.clientSessionId.trim()) ||
+        (typeof result.id === 'string' && result.id.trim()) ||
+        job.id,
       timestamp: job.completedAt?.toISOString() || new Date().toISOString(),
-      status: 'complete' as const,
+      status:
+        result.status === 'partial' || result.status === 'analyzing' || result.status === 'error'
+          ? result.status
+          : 'complete',
       language: (job.language as 'en' | 'cn') || result.language || 'en',
       query: job.query || job.ticker,
     };
@@ -90,9 +127,15 @@ function parseJobToAnalysisState(job: {
     return {
       ...result,
       id: job.id,
-      clientSessionId: typeof result.id === 'string' ? result.id : job.id,
+      clientSessionId:
+        (typeof result.clientSessionId === 'string' && result.clientSessionId.trim()) ||
+        (typeof result.id === 'string' && result.id.trim()) ||
+        job.id,
       timestamp: job.completedAt?.toISOString() || new Date().toISOString(),
-      status: 'complete' as const,
+      status:
+        result.status === 'partial' || result.status === 'analyzing' || result.status === 'error'
+          ? result.status
+          : 'complete',
       language: (job.language as 'en' | 'cn') || 'en',
       query: job.query || job.ticker,
     };
@@ -102,132 +145,97 @@ function parseJobToAnalysisState(job: {
   }
 }
 
-type HistoryListRow = {
-  id: string;
-  ticker: string;
-  query: string;
-  language: string;
-  completedAt: Date | null;
-  summary: string | null;
-};
+function dedupeHistoryByJobId(history: AnalysisState[]): AnalysisState[] {
+  const byId = new Map<string, AnalysisState>();
+  for (const item of history) {
+    byId.set(item.id, item);
+  }
+  return [...byId.values()].sort(
+    (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+  );
+}
 
-const HISTORY_LIST_SQL = `
-  SELECT
-    j.id,
-    j.ticker,
-    j.query,
-    j.language,
-    j."completedAt",
-    (
-      SELECT jsonb_strip_nulls(jsonb_build_object(
-        'id', r->'id',
-        'focusCompany',
-          CASE
-            WHEN jsonb_typeof(r->'focusCompany') = 'object' THEN
-              (r->'focusCompany') - 'qna' || jsonb_build_object('qna', '[]'::jsonb)
-          END,
-        'candidateCompanies',
-          (
-            SELECT COALESCE(
-              jsonb_agg(
-                CASE
-                  WHEN jsonb_typeof(elem) = 'object' THEN
-                    (elem - 'qna') || jsonb_build_object('qna', '[]'::jsonb)
-                  ELSE elem
-                END
-              ),
-              '[]'::jsonb
-            )
-            FROM jsonb_array_elements(
-              CASE
-                WHEN jsonb_typeof(r->'candidateCompanies') = 'array' THEN r->'candidateCompanies'
-                ELSE '[]'::jsonb
-              END
-            ) AS elem
-          ),
-        'analysisType', r->'analysisType',
-        'parentAnalysisId', r->'parentAnalysisId',
-        'followUpMeta', r->'followUpMeta'
-      ))::text
-    ) AS summary
-  FROM "AnalysisJob" j
-  CROSS JOIN LATERAL (SELECT j.result::jsonb AS r) AS parsed
-  WHERE j.status = 'COMPLETED' AND j.result IS NOT NULL
-  ORDER BY j."completedAt" DESC
-  LIMIT $1
-`;
+async function loadHistoryPageFromDb(
+  userId: string,
+  limit: number,
+  offset: number,
+  options?: { includeTotal?: boolean }
+): Promise<{ history: AnalysisState[]; total?: number; hasMore: boolean }> {
+  const includeTotal = options?.includeTotal ?? true;
+  const take = includeTotal ? limit : limit + 1;
 
-async function loadHistoryFromDbFallback(maxItems: number): Promise<AnalysisState[]> {
+  // listSummary only — never read multi-MB `result` blobs for sidebar list (major latency win).
   const rows = await withPrismaRetry(
     () =>
       prisma.analysisJob.findMany({
-        where: { status: 'COMPLETED', result: { not: null } },
+        where: {
+          status: 'COMPLETED',
+          userId,
+          listSummary: { not: null },
+        },
         orderBy: { completedAt: 'desc' },
-        take: maxItems,
+        skip: offset,
+        take,
         select: {
           id: true,
           ticker: true,
           query: true,
           language: true,
           completedAt: true,
-          result: true,
+          listSummary: true,
         },
       }),
-    'history.fallback',
+    'history.list',
     3
   );
 
+  const hasMoreWithoutCount = !includeTotal && rows.length > limit;
+  const pageRows = hasMoreWithoutCount ? rows.slice(0, limit) : rows;
+  const total = includeTotal
+    ? await withPrismaRetry(
+        () =>
+          prisma.analysisJob.count({
+            where: { status: 'COMPLETED', userId, listSummary: { not: null } },
+          }),
+        'history.count',
+        2
+      )
+    : undefined;
+
   const history: AnalysisState[] = [];
-  for (const row of rows) {
-    if (!row.result) continue;
-    const parsed = parseJobToAnalysisState({
-      id: row.id,
-      ticker: row.ticker,
-      query: row.query,
-      language: row.language,
-      completedAt: row.completedAt,
-      result: row.result,
-    });
+  for (const row of pageRows) {
+    if (!row.listSummary) continue;
+    const parsed = parseSummaryToAnalysisState(row, row.listSummary);
     if (parsed) {
-      history.push(slimHistoryItem(parsed));
+      history.push(parsed);
     }
   }
-  return dedupeHistoryBySession(history);
+
+  return {
+    history: dedupeHistoryByJobId(history),
+    total,
+    hasMore: includeTotal ? offset + pageRows.length < (total || 0) : hasMoreWithoutCount,
+  };
 }
 
-async function loadHistoryFromDb(): Promise<AnalysisState[]> {
-  const maxItems = Number(process.env.HISTORY_MAX_ITEMS) || 50;
-
-  // Fresh client helps recover after HMR restarts left stale pooler sessions.
-  await resetPrismaConnection();
-
-  try {
-    const rows = await withPrismaRetry(
-      () => prisma.$queryRawUnsafe<HistoryListRow[]>(HISTORY_LIST_SQL, maxItems),
-      'history.list',
-      3
-    );
-
-    const history: AnalysisState[] = [];
-    for (const row of rows) {
-      if (!row.summary) continue;
-      const parsed = parseSummaryToAnalysisState(row, row.summary);
-      if (parsed) {
-        history.push(parsed);
-      }
-    }
-    return dedupeHistoryBySession(history);
-  } catch (error) {
-    console.warn('SQL history list failed, falling back to in-process slim parse:', error);
-    return loadHistoryFromDbFallback(maxItems);
+async function loadHistoryFromDb(userId: string): Promise<AnalysisState[]> {
+  const cached = getCachedHistory(userId);
+  if (cached) {
+    return cached;
   }
+
+  const maxItems = Number(process.env.HISTORY_MAX_ITEMS) || 50;
+  const { history } = await loadHistoryPageFromDb(userId, maxItems, 0, { includeTotal: false });
+  setCachedHistory(userId, history);
+  return history;
 }
 
 /**
  * POST /api/history
  */
-router.post('/', async (req, res) => {
+router.post('/', requireAuth, async (req, res) => {
   try {
+    const userId = req.user!.id;
     const { result, query, language = 'en' } = req.body;
 
     if (!result || !query) {
@@ -238,33 +246,64 @@ router.post('/', async (req, res) => {
 
     const ticker = result.focusCompany?.profile?.ticker || query.split(' ')[0].toUpperCase();
 
+    const listSummary = buildHistoryListSummary(result);
+
     const sessionId = typeof result.id === 'string' ? result.id.trim() : '';
-    if (sessionId) {
+    const clientSessionId =
+      typeof result.clientSessionId === 'string' ? result.clientSessionId.trim() : sessionId;
+    if (sessionId || clientSessionId) {
+      const lookupId = sessionId || clientSessionId;
       const existing = await withPrismaRetry(
         () =>
           prisma.$queryRawUnsafe<Array<{ id: string }>>(
             `SELECT id FROM "AnalysisJob"
-             WHERE status = 'COMPLETED' AND result IS NOT NULL
-               AND result::jsonb->>'id' = $1
+             WHERE status = 'COMPLETED' AND result IS NOT NULL AND "userId" = $2
+               AND (
+                 result::jsonb->>'id' = $1
+                 OR result::jsonb->>'clientSessionId' = $1
+               )
              ORDER BY "completedAt" DESC
              LIMIT 1`,
-            sessionId
+            lookupId,
+            userId
           ),
         'history.create.dedup'
       );
       if (existing.length > 0) {
-        historyListPromise = null;
+        const jobId = existing[0].id;
+        await withPrismaRetry(
+          () =>
+            prisma.analysisJob.update({
+              where: { id: jobId },
+              data: {
+                ticker,
+                query,
+                language,
+                status: 'COMPLETED',
+                completedAt: new Date(),
+                progress: result.status === 'partial' ? 80 : 100,
+                currentStep:
+                  result.status === 'partial' ? 'Focus report saved' : 'Analysis Complete',
+                result: JSON.stringify(result),
+                listSummary,
+              },
+            }),
+          'history.create.update'
+        );
+        historyListPromises.delete(userId);
+        invalidateHistoryListCache(userId);
         return res.json({
           success: true,
-          message: 'Report already saved',
-          jobId: existing[0].id,
-          deduplicated: true,
+          message: 'Report updated successfully',
+          jobId,
+          updated: true,
         });
       }
     }
 
     const job = await withPrismaRetry(() => prisma.analysisJob.create({
       data: {
+        userId,
         ticker,
         query,
         language,
@@ -274,10 +313,18 @@ router.post('/', async (req, res) => {
         progress: 100,
         currentStep: 'Analysis Complete',
         result: JSON.stringify(result),
+        listSummary,
       },
     }), 'history.create');
 
-    historyListPromise = null;
+    historyListPromises.delete(userId);
+    invalidateHistoryListCache(userId);
+
+    await trackUserEvent({
+      userId,
+      eventType: 'analysis_complete',
+      metadata: { jobId: job.id, ticker, query },
+    });
 
     res.json({
       success: true,
@@ -298,26 +345,55 @@ router.post('/', async (req, res) => {
 /**
  * GET /api/history
  */
-router.get('/', async (_req, res) => {
+router.get('/', requireAuthLite, async (req, res) => {
   try {
-    if (!historyListPromise) {
-      historyListPromise = withTimeout(
-        loadHistoryFromDb(),
-        HISTORY_LOAD_TIMEOUT_MS,
-        'History load'
-      ).finally(() => {
-        historyListPromise = null;
+    const userId = req.user!.id;
+    const maxItems = Number(process.env.HISTORY_MAX_ITEMS) || 50;
+    const limit = Math.min(Math.max(Number(req.query.limit) || maxItems, 1), maxItems);
+    const offset = Math.max(Number(req.query.offset) || 0, 0);
+    const wantsFullList = limit >= maxItems && offset === 0;
+
+    if (wantsFullList) {
+      const cached = getCachedHistory(userId);
+      if (cached) {
+        return res.json({ history: cached, total: cached.length, cached: true });
+      }
+
+      if (!historyListPromises.has(userId)) {
+        historyListPromises.set(
+          userId,
+          withTimeout(loadHistoryFromDb(userId), HISTORY_LOAD_TIMEOUT_MS, 'History load').finally(
+            () => {
+              historyListPromises.delete(userId);
+            }
+          )
+        );
+      }
+
+      const history = await historyListPromises.get(userId)!;
+      return res.json({
+        history,
+        total: history.length,
       });
     }
 
-    const history = await historyListPromise;
+    const includeTotal = req.query.includeTotal === 'true';
+    const { history, total, hasMore } = await withTimeout(
+      loadHistoryPageFromDb(userId, limit, offset, { includeTotal }),
+      HISTORY_LOAD_TIMEOUT_MS,
+      'History page load'
+    );
+    const estimatedTotal = total ?? offset + history.length + (hasMore ? 1 : 0);
 
     res.json({
       history,
-      total: history.length,
+      total: estimatedTotal,
+      hasMore,
+      limit,
+      offset,
     });
   } catch (error: any) {
-    historyListPromise = null;
+    historyListPromises.delete(req.user!.id);
     console.error('Error fetching history:', error);
     if (!res.headersSent) {
       const timedOut = /timed out/i.test(error?.message || '');
@@ -334,13 +410,14 @@ router.get('/', async (_req, res) => {
 /**
  * GET /api/history/:id — full report with Q&A
  */
-router.get('/:id', async (req, res) => {
+router.get('/:id', requireAuthLite, async (req, res) => {
   try {
+    const userId = req.user!.id;
     const { id } = req.params;
     const job = await withPrismaRetry(
       () =>
-        prisma.analysisJob.findUnique({
-          where: { id },
+        prisma.analysisJob.findFirst({
+          where: { id, userId },
           select: {
             id: true,
             ticker: true,
@@ -372,6 +449,12 @@ router.get('/:id', async (req, res) => {
       return res.status(404).json({ error: 'Report not found or corrupted' });
     }
 
+    void trackUserEvent({
+      userId,
+      eventType: 'report_open',
+      metadata: { reportId: id, ticker: job.ticker },
+    });
+
     res.json({ report: parsed });
   } catch (error: any) {
     console.error('Error fetching report:', error);
@@ -387,15 +470,22 @@ router.get('/:id', async (req, res) => {
 /**
  * DELETE /api/history/:id
  */
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', requireAuth, async (req, res) => {
   try {
+    const userId = req.user!.id;
     const { id } = req.params;
+
+    const existing = await prisma.analysisJob.findFirst({ where: { id, userId } });
+    if (!existing) {
+      return res.status(404).json({ error: 'Report not found' });
+    }
 
     const deleted = await prisma.analysisJob.delete({
       where: { id },
     });
 
-    historyListPromise = null;
+    historyListPromises.delete(userId);
+    invalidateHistoryListCache(userId);
 
     res.json({
       success: true,
@@ -420,13 +510,15 @@ router.delete('/:id', async (req, res) => {
 /**
  * DELETE /api/history
  */
-router.delete('/', async (_req, res) => {
+router.delete('/', requireAuth, async (req, res) => {
   try {
+    const userId = req.user!.id;
     const result = await prisma.analysisJob.deleteMany({
-      where: { status: 'COMPLETED' },
+      where: { status: 'COMPLETED', userId },
     });
 
-    historyListPromise = null;
+    historyListPromises.delete(userId);
+    invalidateHistoryListCache(userId);
 
     res.json({
       success: true,

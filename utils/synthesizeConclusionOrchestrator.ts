@@ -27,6 +27,7 @@ export const synthesizeInvestmentConclusionBySections = async (options: {
   qna: SynthesizeConclusionQnA[];
   callSection: SynthesizeSectionCaller;
   concurrency?: number;
+  marketContext?: string;
 }): Promise<InvestmentConclusion> => {
   const tasks = THESIS_SECTION_KEYS.map((sectionKey, index) => ({ index, item: sectionKey }));
   const sectionResults = new Map<ThesisSectionKey, InvestmentConclusion[ThesisSectionKey]>();
@@ -43,7 +44,8 @@ export const synthesizeInvestmentConclusionBySections = async (options: {
             options.recencyGuidance,
             options.qna,
             task.item,
-            strict
+            strict,
+            options.marketContext
           ),
           strict
         );

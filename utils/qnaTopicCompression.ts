@@ -33,6 +33,9 @@ const SECTION_TOPIC_PATTERNS: Record<ThesisSectionKey, RegExp[]> = {
   IndustryCycle: [
     /周期|行业|产能|利用率|景气|cycle|industry|utilization|trough|peak|supply.?demand/i,
   ],
+  ExpectationGap: [
+    /预期差|市场预期|刻板印象|定价框架|叙事|催化剂|里程碑|Bullish Expectation|Market Expectation|expectation gap|consensus|re-rating|stereotype|priced.?in|near.?term/i,
+  ],
 };
 
 const splitSentences = (text: string): string[] =>

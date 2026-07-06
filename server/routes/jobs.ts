@@ -1,14 +1,16 @@
 import express from 'express';
 import { prisma } from '../db.js';
 import { JobStatus } from '@prisma/client';
-import { addToQueue, getQueueStatus, getJobById } from '../actions/queue.js';
-import { startQueueProcessing } from '../actions/process.js';
+import { addToQueue, getQueueStatus, getJobById, retryFailedJob } from '../actions/queue.js';
+import { startQueueProcessing, resetStaleProcessingJobs } from '../actions/process.js';
+import { assertCanAnalyzeCompanies, UsageLimitError } from '../services/usageLimit.js';
 
 const router = express.Router();
 
 // POST /api/jobs/batch - Create a new batch job
 router.post('/batch', async (req, res) => {
   try {
+    const userId = req.user!.id;
     const { tickers, language = 'en' } = req.body;
 
     if (!tickers || typeof tickers !== 'string') {
@@ -30,17 +32,18 @@ router.post('/batch', async (req, res) => {
       });
     }
 
-    // Create batch job
+    await assertCanAnalyzeCompanies(userId, tickerList.length);
+
     const batchJob = await prisma.batchJob.create({
       data: {
+        userId,
         tickers,
         language,
         status: 'PENDING',
       },
     });
 
-    // Use queue action to create jobs
-    const { jobIds, jobs } = await addToQueue(tickerList, language, batchJob.id);
+    const { jobIds, jobs } = await addToQueue(tickerList, language, batchJob.id, userId);
 
     // Trigger background processing (Fire-and-Forget)
     // This allows the HTTP request to return immediately
@@ -49,11 +52,32 @@ router.post('/batch', async (req, res) => {
     res.json({
       batchJobId: batchJob.id,
       jobCount: jobs.length,
-      jobs: jobs.map(j => ({ id: j.id, ticker: j.ticker })),
+      jobs: jobs.map(j => ({
+        id: j.id,
+        ticker: j.ticker,
+        companyName: j.companyName ?? null,
+        status: j.status,
+        createdAt: j.createdAt,
+        completedAt: j.completedAt,
+        progress: j.progress ?? 0,
+        currentStep: j.currentStep ?? null,
+        overallConclusion: null,
+        currentPrice: null,
+        currency: null,
+        estimatedCostUsd: null,
+        totalTokens: null,
+        result: null,
+      })),
       message: 'Batch job created. Background processing started.',
     });
   } catch (error: any) {
     console.error('Error creating batch job:', error);
+    if (error instanceof UsageLimitError) {
+      return res.status(429).json({
+        error: error.message,
+        usage: error.summary,
+      });
+    }
     // Ensure we always send a valid JSON response
     if (!res.headersSent) {
       res.status(500).json({
@@ -69,8 +93,8 @@ router.get('/batch/:id', async (req, res) => {
   try {
     const { id } = req.params;
 
-    const batchJob = await prisma.batchJob.findUnique({
-      where: { id },
+    const batchJob = await prisma.batchJob.findFirst({
+      where: { id, userId: req.user!.id },
       include: {
         jobs: {
           orderBy: { createdAt: 'asc' },
@@ -117,6 +141,33 @@ router.get('/batch/:id', async (req, res) => {
   }
 });
 
+// POST /api/jobs/:id/retry - Re-queue a failed job (resumes from checkpoint if available)
+router.post('/:id/retry', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const userId = req.user!.id;
+
+    const job = await retryFailedJob(id, userId);
+    const processingCount = await prisma.analysisJob.count({ where: { status: 'PROCESSING' } });
+    if (processingCount >= 2) {
+      await resetStaleProcessingJobs(90_000);
+    }
+    startQueueProcessing();
+
+    res.json({
+      success: true,
+      message: job.result
+        ? 'Job re-queued — will resume from last checkpoint'
+        : 'Job re-queued from the beginning',
+      job,
+    });
+  } catch (error: any) {
+    const message = error?.message || 'Failed to retry job';
+    const status = /not found/i.test(message) ? 404 : /only failed/i.test(message) ? 400 : 500;
+    res.status(status).json({ error: message });
+  }
+});
+
 // GET /api/jobs/:id - Get individual job status and result
 router.get('/:id', async (req, res) => {
   try {
@@ -124,7 +175,7 @@ router.get('/:id', async (req, res) => {
 
     const job = await getJobById(id);
 
-    if (!job) {
+    if (!job || job.userId !== req.user!.id) {
       return res.status(404).json({ error: 'Job not found' });
     }
 
@@ -165,7 +216,10 @@ router.get('/', async (req, res) => {
       options.batchJobId = batchJobId as string;
     }
 
-    const queueStatus = await getQueueStatus(options);
+    const queueStatus = await getQueueStatus({
+      ...options,
+      userId: req.user!.id,
+    });
 
     res.json({
       jobs: queueStatus.jobs,

@@ -27,6 +27,7 @@ export type ModelCallStep =
   | 'answer_question'
   | 'follow_up_answer_question'
   | 'doubao_search'
+  | 'google_search'
   | 'answer_question_synthesis'
   | 'synthesize_conclusion'
   | 'synthesize_conclusion_section'
@@ -36,6 +37,9 @@ export type ModelCallStep =
   | 'final_conclusion'
   | 'follow_up_final_conclusion'
   | 'quick_take'
+  | 'market_hot_topics'
+  | 'cross_company_compare'
+  | 'cross_company_compare_follow_up'
   | 'custom';
 
 export interface UsageMetrics {
@@ -99,6 +103,9 @@ const DEEPSEEK_ALWAYS_NO_THINKING_STEPS = new Set<ModelCallStep>([
   'follow_up_question_generation',
   'synthesize_conclusion_section',
   'follow_up_synthesize_conclusion_section',
+  'cross_company_compare',
+  'cross_company_compare_follow_up',
+  'market_hot_topics',
 ]);
 
 /** Needs factual recall + structured JSON — medium thinking. */
@@ -159,7 +166,7 @@ const getDeepSeekTimeoutMs = (step: ModelCallStep): number => {
     step === 'final_conclusion' ||
     step === 'follow_up_final_conclusion'
   ) {
-    return 240_000;
+    return 360_000;
   }
   return 180_000;
 };
@@ -367,6 +374,64 @@ Answer requirements:
 - Write in clear prose suitable for an investment research report (not a raw search dump).`;
 };
 
+const buildVertexGoogleSearchContextText = (
+  chunks: Array<{ web?: { uri?: string; title?: string }; retrievedContext?: { text?: string } }>,
+  modelText: string
+): string => {
+  const lines = chunks
+    .map((chunk, index) => {
+      const title = chunk.web?.title?.trim() || `Google result ${index + 1}`;
+      const uri = chunk.web?.uri?.trim() || '';
+      const snippet =
+        (typeof chunk.retrievedContext?.text === 'string' && chunk.retrievedContext.text.trim()) ||
+        '';
+      const normalized = snippet.replace(/\s+/g, ' ').slice(0, 900);
+      const urlSuffix = uri ? ` (${uri})` : '';
+      return `- ${title}${urlSuffix}${normalized ? `: ${normalized}` : ''}`;
+    })
+    .filter(Boolean);
+
+  if (lines.length > 0) {
+    return `Google Search results:\n${lines.join('\n')}`;
+  }
+
+  const fallback = (modelText || '').trim();
+  return fallback
+    ? `Google Search summary:\n${fallback.slice(0, 4000)}`
+    : 'Google Search returned no extractable snippets.';
+};
+
+const buildAdvancedDualSearchSynthesisPrompt = (
+  originalPrompt: string,
+  doubaoContextText: string,
+  doubaoCount: number,
+  googleContextText: string,
+  googleCount: number
+): string => {
+  const doubaoSection = doubaoContextText.trim() || 'No Doubao web results were returned.';
+  const googleSection = googleContextText.trim() || 'No Google Search results were returned.';
+
+  return `${originalPrompt}
+
+You have TWO independent web search sources. Synthesize one coherent financial analyst answer.
+
+Source A — Doubao web search (${doubaoCount} pages):
+${doubaoSection}
+
+Source B — Google Search (${googleCount} sources, PRIORITY ON CONFLICTS):
+${googleSection}
+
+Merge & conflict rules:
+- Use BOTH sources; prefer unique facts from each when they complement each other.
+- If Source A and Source B disagree on a material fact (numbers, dates, events, company identity), TRUST Source B (Google Search).
+- When only Source A has evidence for a non-controversial point, you may use it.
+- Follow the language, recency, and company-identity rules from the original task above.
+- Ground every key claim in the merged evidence; do not invent unsupported facts.
+- Include period labels (YYYY-Qx, YYYY annual report, YYYY-MM) for material numbers.
+- If evidence is insufficient, clearly state the limitation.
+- Write in clear prose suitable for an investment research report (not a raw search dump).`;
+};
+
 const getDoubaoResultCount = (data: any, webResults: any[]): number => {
   const result = data?.Result;
   if (typeof result?.ResultCount === 'number') return result.ResultCount;
@@ -470,6 +535,31 @@ const parseDoubaoGroundingChunks = (data: any): Array<{ web: { uri: string; titl
   const deduped = new Map<string, { web: { uri: string; title: string } }>();
   for (const chunk of chunks) {
     deduped.set(chunk.web.uri, chunk);
+  }
+  return Array.from(deduped.values());
+};
+
+const parseVertexGroundingChunks = (
+  rawChunks: Array<{ web?: { uri?: string; title?: string; url?: string } }>
+): Array<{ web: { uri: string; title: string } }> => {
+  const deduped = new Map<string, { web: { uri: string; title: string } }>();
+  for (const chunk of rawChunks) {
+    const uri = (chunk?.web?.uri || chunk?.web?.url || '').trim();
+    if (!uri) continue;
+    const title = (chunk?.web?.title || uri).trim();
+    deduped.set(uri, { web: { uri, title } });
+  }
+  return Array.from(deduped.values());
+};
+
+const mergeGroundingChunks = (
+  ...groups: Array<Array<{ web: { uri: string; title: string } }>>
+): Array<{ web: { uri: string; title: string } }> => {
+  const deduped = new Map<string, { web: { uri: string; title: string } }>();
+  for (const group of groups) {
+    for (const chunk of group) {
+      deduped.set(chunk.web.uri, chunk);
+    }
   }
   return Array.from(deduped.values());
 };
@@ -709,9 +799,43 @@ export class ModelClient {
     });
   }
 
+  private async executeVertexGoogleSearch(originalPrompt: string): Promise<{
+    groundingChunks: Array<{ web: { uri: string; title: string } }>;
+    searchContextText: string;
+    usage: UsageMetrics;
+  }> {
+    const model = getVertexSearchFallbackModel();
+    const result = await this.vertexClient.models.generateContent({
+      model,
+      contents: { role: 'user', parts: [{ text: originalPrompt }] },
+      config: { tools: [{ googleSearch: {} }] },
+    });
+
+    const rawChunks = result?.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
+    const groundingChunks = parseVertexGroundingChunks(rawChunks);
+    const searchContextText = buildVertexGoogleSearchContextText(rawChunks, result?.text || '');
+    const usage = parseVertexUsage(result, true);
+
+    return { groundingChunks, searchContextText, usage };
+  }
+
+  private async executeVertexGoogleSearchSafe(originalPrompt: string): Promise<{
+    groundingChunks: Array<{ web: { uri: string; title: string } }>;
+    searchContextText: string;
+    usage: UsageMetrics;
+  } | null> {
+    try {
+      return await this.executeVertexGoogleSearch(originalPrompt);
+    } catch (error) {
+      console.warn('[Advanced Search] Google Search stage failed:', error);
+      return null;
+    }
+  }
+
   /**
    * Doubao Q&A uses a dedicated two-stage pipeline (search → analysis synthesis).
-   * Vertex Google Search path is unchanged and handled separately in generateContent().
+   * Advanced mode adds a Google Search stage and merges both before synthesis.
+   * Vertex-only Google Search path is unchanged and handled separately in generateContent().
    */
   private async generateDoubaoAnswerQuestion(
     params: GenerateParams,
@@ -737,11 +861,43 @@ export class ModelClient {
       usage: searchResult.usage,
     });
 
-    const synthesisPrompt = buildDoubaoSynthesisPrompt(
-      originalPrompt,
-      searchResult.searchContextText,
-      searchResult.webResults.length
-    );
+    const isAdvancedSearch = runtime.searchMode === 'advanced';
+    let googleResult: {
+      groundingChunks: Array<{ web: { uri: string; title: string } }>;
+      searchContextText: string;
+      usage: UsageMetrics;
+    } | null = null;
+
+    if (isAdvancedSearch) {
+      const googleStageStartedAt = new Date();
+      const googleStageStartMs = Date.now();
+      googleResult = await this.executeVertexGoogleSearchSafe(originalPrompt);
+      if (googleResult) {
+        this.emitTelemetry({
+          step: 'google_search',
+          provider: 'vertex',
+          model: getVertexSearchFallbackModel(),
+          startedAt: googleStageStartedAt.toISOString(),
+          durationMs: Date.now() - googleStageStartMs,
+          usage: googleResult.usage,
+        });
+      }
+    }
+
+    const synthesisPrompt =
+      isAdvancedSearch && googleResult
+        ? buildAdvancedDualSearchSynthesisPrompt(
+            originalPrompt,
+            searchResult.searchContextText,
+            searchResult.webResults.length,
+            googleResult.searchContextText,
+            googleResult.groundingChunks.length
+          )
+        : buildDoubaoSynthesisPrompt(
+            originalPrompt,
+            searchResult.searchContextText,
+            searchResult.webResults.length
+          );
 
     const synthesisResponse = await this.generateContent({
       step: 'answer_question_synthesis',
@@ -751,11 +907,19 @@ export class ModelClient {
       requireGoogleSearch: false,
     });
 
-    const mergedUsage = mergeUsage(searchResult.usage, synthesisResponse.usage);
+    const mergedUsage = mergeUsage(
+      searchResult.usage,
+      googleResult?.usage,
+      synthesisResponse.usage
+    );
     const durationMs = Date.now() - startMs;
+    const mergedGrounding = mergeGroundingChunks(
+      searchResult.groundingChunks,
+      googleResult?.groundingChunks || []
+    );
 
     this.emitTelemetry({
-      step: 'answer_question',
+      step: params.step === 'follow_up_answer_question' ? 'follow_up_answer_question' : 'answer_question',
       provider: 'doubao',
       model: chosen.model,
       startedAt: startedAt.toISOString(),
@@ -767,6 +931,8 @@ export class ModelClient {
       console.warn('[Doubao Search] synthesis returned empty text', JSON.stringify({
         query: searchResult.query,
         webResultsLength: searchResult.webResults.length,
+        googleChunks: googleResult?.groundingChunks.length || 0,
+        advanced: isAdvancedSearch,
         analysisProvider: runtime.analysis.provider,
         analysisModel: runtime.analysis.model,
       }));
@@ -774,12 +940,10 @@ export class ModelClient {
 
     return {
       text: synthesisResponse.text,
-      candidates: searchResult.groundingChunks.length
-        ? [{ groundingMetadata: { groundingChunks: searchResult.groundingChunks } }]
+      candidates: mergedGrounding.length
+        ? [{ groundingMetadata: { groundingChunks: mergedGrounding } }]
         : [],
-      groundingMetadata: searchResult.groundingChunks.length
-        ? { groundingChunks: searchResult.groundingChunks }
-        : undefined,
+      groundingMetadata: mergedGrounding.length ? { groundingChunks: mergedGrounding } : undefined,
       usage: mergedUsage,
       provider: 'doubao',
       model: chosen.model,
@@ -796,7 +960,11 @@ export class ModelClient {
 
     try {
       if (chosen.provider === 'doubao') {
-        if (params.step === 'answer_question') {
+        if (
+          params.step === 'answer_question' ||
+          params.step === 'follow_up_answer_question' ||
+          params.step === 'market_hot_topics'
+        ) {
           return await this.generateDoubaoAnswerQuestion(
             params,
             { provider: 'doubao', model: chosen.model, isSearch: chosen.isSearch },
@@ -804,7 +972,7 @@ export class ModelClient {
             startMs
           );
         }
-        throw new Error(`Doubao provider is only supported for answer_question, got step=${params.step}`);
+        throw new Error(`Doubao provider is only supported for answer_question, follow_up_answer_question and market_hot_topics, got step=${params.step}`);
       }
 
       if (chosen.provider === 'deepseek') {

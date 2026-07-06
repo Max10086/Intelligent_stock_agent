@@ -1,4 +1,4 @@
-import type { Language } from '../types.ts';
+import type { CompanyProfile, Language } from '../types.ts';
 import {
   RESEARCH_QUESTION_DIMENSIONS,
   formatBatchDedupHint,
@@ -6,9 +6,10 @@ import {
   getDimensionIndexRange,
   getResearchQuestionDimensions,
 } from './questionGenerationBatches.ts';
+import { buildCompanyIdentityBlock } from './companyIdentity.ts';
 
-export const DEFAULT_FOCUS_QUESTION_COUNT = 15;
-export const DEFAULT_CANDIDATE_QUESTION_COUNT = 15;
+export const DEFAULT_FOCUS_QUESTION_COUNT = 18;
+export const DEFAULT_CANDIDATE_QUESTION_COUNT = 18;
 
 export interface QuestionPromptBatchOptions {
   batchIndex: number;
@@ -76,14 +77,16 @@ ${coverageLabels.map((label, i) => `${dimensionRange.start + i}) ${label}`).join
 };
 
 export const buildGenerateQuestionsPrompt = (
-  companyName: string,
+  company: Pick<CompanyProfile, 'name' | 'ticker' | 'exchange'>,
   outputLanguage: string,
   questionCount: number,
   recencyGuidance: string,
   batch?: QuestionPromptBatchOptions,
   strictLanguageRetry = false
 ): string => {
+  const companyName = company.name;
   const lang: Language = /chinese/i.test(outputLanguage) ? 'cn' : 'en';
+  const identityBlock = buildCompanyIdentityBlock(company, lang);
   const dimensions = getResearchQuestionDimensions(lang);
 
   const coverageLabels =
@@ -134,10 +137,18 @@ export const buildGenerateQuestionsPrompt = (
 
   const intro =
     lang === 'cn'
-      ? `${batchHeader}请为「${companyName}」生成恰好 ${questionCount} 个深度投资研究问题。输出语言：简体中文。
+      ? `${batchHeader}${identityBlock}
+
+请为「${companyName}」（${company.ticker} / ${company.exchange}）生成恰好 ${questionCount} 个深度投资研究问题。输出语言：简体中文。
+- 所有问题必须明确指向上述唯一公司实体；禁止针对同名/同代码的其他上市公司。
+- 问题中应适当包含公司名、${company.ticker} 或 ${company.exchange}，避免检索时误匹配。
 
 ${languageRule}`
-      : `${batchHeader}Generate exactly ${questionCount} in-depth critical investment research questions in English about "${companyName}".
+      : `${batchHeader}${identityBlock}
+
+Generate exactly ${questionCount} in-depth critical investment research questions in English about "${companyName}" (${company.ticker} / ${company.exchange}).
+- Every question MUST target this exact listed entity only — never a namesake on another exchange.
+- Include the company name, ${company.ticker}, or ${company.exchange} where helpful to avoid search ambiguity.
 
 ${languageRule}`;
 

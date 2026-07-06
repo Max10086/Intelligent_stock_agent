@@ -10,11 +10,38 @@ import { useStockAgent } from './hooks/useStockAgent.ts';
 import { useBatchJobs } from './hooks/useBatchJobs.ts';
 import { AnalysisState, Language } from './types.ts';
 import { Header } from './components/Header.tsx';
+import { ComparePage } from './components/ComparePage.tsx';
 import { HistorySidebar } from './components/HistorySidebar.tsx';
+import { useCompanyCompare } from './hooks/useCompanyCompare.ts';
+import { AnalysisStepTimeline } from './components/AnalysisStepTimeline.tsx';
+import { getUIText, FEATURE_BATCH_QUEUE } from './constants.ts';
+import { useAuth } from './hooks/useAuth.ts';
+import { LoginPage } from './components/LoginPage.tsx';
+import { UsageBanner } from './components/UsageBanner.tsx';
+import { setUsageRefreshCallback } from './utils/usageEvents.ts';
+import { useAnalytics } from './hooks/useAnalytics.ts';
 import { resolveRootReportForTicker } from './utils/analysisTimeline.ts';
 import { persistUiLanguage, readStoredUiLanguage } from './utils/uiLanguage.ts';
 
-type ViewMode = 'single' | 'batch';
+const STEP_TIMELINE_STORAGE_KEY = 'stock-agent-show-step-timeline';
+
+const readStoredStepTimelinePreference = (): boolean => {
+  try {
+    return localStorage.getItem(STEP_TIMELINE_STORAGE_KEY) === '1';
+  } catch {
+    return false;
+  }
+};
+
+const persistStepTimelinePreference = (visible: boolean) => {
+  try {
+    localStorage.setItem(STEP_TIMELINE_STORAGE_KEY, visible ? '1' : '0');
+  } catch {
+    // Ignore storage failures in private browsing.
+  }
+};
+
+type ViewMode = 'single' | 'batch' | 'compare';
 type ActiveModelSnapshot = {
   analysis: string | null;
   search: string | null;
@@ -30,14 +57,23 @@ const App: React.FC = () => {
     companyIds?: string[];
   } | null>(null);
   const [viewingBaselineReport, setViewingBaselineReport] = useState<AnalysisState | null>(null);
+  const [showStepTimeline, setShowStepTimeline] = useState(() => readStoredStepTimelinePreference());
+  const uiText = getUIText(language);
+  const auth = useAuth();
   const {
     analysisState,
     history,
     isLoadingHistory,
+    isLoadingMoreHistory,
+    loadingReportId,
+    historyLoadedCount,
+    historyTotalCount,
+    historyHasMore,
     historyError,
     saveStatus,
     saveMessage,
     startAnalysis,
+    startCandidateAnalysis,
     startFollowUpAnalysis,
     resetAnalysis,
     loadFromHistory,
@@ -47,14 +83,123 @@ const App: React.FC = () => {
     retryLastAnalysis,
     refreshHistory,
     runtimeModelConfig,
+    applyRuntimeModelConfig,
     reloadRuntimeModelConfig,
-  } = useStockAgent();
-  const { activeBatchJobId, batchJobStatus, isPolling, submitBatchJob, clearBatchJob } = useBatchJobs();
+  } = useStockAgent({
+    historyFetchEnabled: auth.isAuthenticated && !auth.isLoading,
+    userId: auth.user?.id ?? auth.session?.user?.id ?? null,
+  });
+  const { trackEvent } = useAnalytics();
+  const {
+    activeBatchJobId,
+    batchJobStatus,
+    isPolling,
+    clearBatchJob,
+    queueStatus,
+    queueFetchError,
+    submitBatchJob,
+    fetchQueueStatus,
+    retryFailedJob,
+  } = useBatchJobs({
+    queuePollingEnabled:
+      auth.isAuthenticated && FEATURE_BATCH_QUEUE && currentView === 'batch',
+  });
+  const companyCompare = useCompanyCompare();
+  const [isLoadingCompareSessions, setIsLoadingCompareSessions] = useState(false);
+  const [compareSessionsError, setCompareSessionsError] = useState<string | null>(null);
+  const [openHistoryToComparisons, setOpenHistoryToComparisons] = useState(false);
+
+  const refreshCompareSessions = useCallback(
+    async (options?: { force?: boolean; silent?: boolean }) => {
+      const force = options?.force ?? false;
+      const silent = options?.silent ?? companyCompare.sessionsLoaded;
+
+      if (companyCompare.sessionsLoaded && !force) {
+        return;
+      }
+
+      if (!silent) {
+        setIsLoadingCompareSessions(true);
+      }
+      setCompareSessionsError(null);
+
+      let lastError: unknown;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          await companyCompare.loadSessions({ force });
+          setIsLoadingCompareSessions(false);
+          return;
+        } catch (err) {
+          lastError = err;
+          if (attempt < 2) {
+            await new Promise(resolve => setTimeout(resolve, 400 * (attempt + 1)));
+          }
+        }
+      }
+      setCompareSessionsError(
+        lastError instanceof Error ? lastError.message : 'Failed to load comparisons'
+      );
+      setIsLoadingCompareSessions(false);
+    },
+    [companyCompare.loadSessions, companyCompare.sessionsLoaded]
+  );
+
+  const handleOpenCompareRun = useCallback(
+    (runId: string) => {
+      void companyCompare.loadRun(runId);
+      setCurrentView('compare');
+      setIsHistoryOpen(false);
+    },
+    [companyCompare.loadRun]
+  );
+
+  const handleOpenNewCompare = useCallback(() => {
+    companyCompare.setActiveRun(null);
+    setCurrentView('compare');
+    setIsHistoryOpen(false);
+  }, [companyCompare.setActiveRun]);
+
+  const handleOpenCompareHistorySidebar = useCallback(() => {
+    setOpenHistoryToComparisons(true);
+    setIsHistoryOpen(true);
+  }, []);
+
+  const handleOpenToComparisonsHandled = useCallback(() => {
+    setOpenHistoryToComparisons(false);
+  }, []);
+
+  const handleToggleHistory = useCallback(() => {
+    setIsHistoryOpen(true);
+    // Reopening the sidebar should show the in-memory / localStorage list immediately.
+    // Only retry when we have no items and the last fetch failed.
+    if (history.length === 0 && historyError) {
+      void refreshHistory();
+    }
+  }, [history.length, historyError, refreshHistory]);
 
   const handleLanguageChange = useCallback((lang: Language) => {
     setLanguage(lang);
     persistUiLanguage(lang);
   }, []);
+
+  useEffect(() => {
+    setUsageRefreshCallback(() => {
+      void auth.refreshUsage();
+    });
+    return () => setUsageRefreshCallback(null);
+  }, [auth.refreshUsage]);
+
+  useEffect(() => {
+    if (auth.isAuthenticated) {
+      trackEvent('page_view', { view: currentView });
+    }
+  }, [auth.isAuthenticated, currentView, trackEvent]);
+
+  useEffect(() => {
+    if (auth.isAuthenticated) {
+      void refreshCompareSessions();
+    }
+  }, [auth.isAuthenticated, refreshCompareSessions]);
 
   useEffect(() => {
     const fetchActiveModel = async () => {
@@ -85,34 +230,37 @@ const App: React.FC = () => {
     fetchActiveModel();
   }, [runtimeModelConfig.analysis.model, runtimeModelConfig.analysis.provider, runtimeModelConfig.search.model]);
 
-  const handleSearch = useCallback((query: string) => {
+  const handleSearch = useCallback(async (query: string) => {
     if (query.trim()) {
-      startAnalysis(query, language);
+      await startAnalysis(query, language);
     }
   }, [language, startAnalysis]);
 
-  const handleBatchSubmit = useCallback(async (tickers: string) => {
-    try {
-      await submitBatchJob(tickers, language);
-    } catch (error) {
-      console.error('Failed to submit batch job:', error);
-      alert(error instanceof Error ? error.message : 'Failed to submit batch job');
-    }
-  }, [language, submitBatchJob]);
-
   const handleReset = useCallback(() => {
     resetAnalysis();
-    clearBatchJob();
+    if (FEATURE_BATCH_QUEUE) {
+      clearBatchJob();
+    }
     setCurrentView('single');
     setViewingBaselineReport(null);
     setFollowUpModal(null);
   }, [resetAnalysis, clearBatchJob]);
+
+  const handleToggleStepTimeline = useCallback(() => {
+    setShowStepTimeline(prev => {
+      const next = !prev;
+      persistStepTimelinePreference(next);
+      return next;
+    });
+  }, []);
 
   const handleViewChange = useCallback((view: ViewMode) => {
     setCurrentView(view);
   }, []);
 
   const handleLoadFromHistory = useCallback((id: string) => {
+    setCurrentView('single');
+    setViewingBaselineReport(null);
     void loadFromHistory(id).catch(error => {
       console.error('Failed to load history report:', error);
       alert(
@@ -121,7 +269,6 @@ const App: React.FC = () => {
           : `Failed to load report: ${error instanceof Error ? error.message : 'Unknown error'}`
       );
     });
-    setViewingBaselineReport(null);
     setIsHistoryOpen(false);
   }, [loadFromHistory, language]);
 
@@ -184,14 +331,50 @@ const App: React.FC = () => {
 
   const displayedAnalysisState = viewingBaselineReport || analysisState;
   const activeReportId = viewingBaselineReport?.id || analysisState.id;
+  const isOpeningReport = Boolean(loadingReportId);
+  const isLoadingReportDetails =
+    Boolean(loadingReportId) && loadingReportId === analysisState.id;
 
   // Show batch job status if active
-  const showBatchStatus = activeBatchJobId && batchJobStatus;
+  const showBatchStatus = FEATURE_BATCH_QUEUE && activeBatchJobId && batchJobStatus;
 
   /** Main search entry (single view, idle) — input form is the only start action. */
   const isSearchHome =
     currentView === 'single' && analysisState.status === 'idle' && !showBatchStatus;
   const showNewAnalysisButton = !isSearchHome;
+
+  const showStepTimelinePanel =
+    showStepTimeline &&
+    currentView === 'single' &&
+    !isSearchHome &&
+    (analysisState.stepLogs?.length ?? 0) > 0;
+
+  if (auth.isLoading) {
+    return (
+      <div className="min-h-screen bg-gray-900 text-gray-100 flex items-center justify-center">
+        <div className="text-center">
+          <div className="inline-block animate-spin rounded-full h-10 w-10 border-b-2 border-blue-400 mb-3" />
+          <p className="text-gray-400 text-sm">{language === 'cn' ? '加载中...' : 'Loading...'}</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!auth.isAuthenticated) {
+    return (
+      <LoginPage
+        language={language}
+        onSignInWithGoogle={auth.signInWithGoogle}
+        onSignInWithEmail={(email, password) => auth.signInWithEmail(email, password, language)}
+        onSendSignUpCode={email => auth.sendSignUpCode(email, language)}
+        onCompleteSignUp={(email, code, password, confirmPassword) =>
+          auth.completeSignUp(email, code, password, confirmPassword, language)
+        }
+        error={auth.error}
+        isConfigured={auth.isConfigured}
+      />
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gray-900 text-gray-100 font-sans">
@@ -200,6 +383,10 @@ const App: React.FC = () => {
         onClose={() => setIsHistoryOpen(false)}
         history={history}
         isLoading={isLoadingHistory}
+        isLoadingMore={isLoadingMoreHistory}
+        historyLoadedCount={historyLoadedCount}
+        historyTotalCount={historyTotalCount}
+        historyHasMore={historyHasMore}
         historyError={historyError}
         onRefreshHistory={() => void refreshHistory()}
         onLoad={handleLoadFromHistory}
@@ -208,6 +395,18 @@ const App: React.FC = () => {
         onClearAll={clearHistory}
         currentLanguage={language}
         activeReportId={activeReportId}
+        loadingReportId={loadingReportId}
+        compareSessions={companyCompare.sessions}
+        isLoadingCompareSessions={isLoadingCompareSessions}
+        compareSessionsError={compareSessionsError}
+        activeCompareRunId={
+          currentView === 'compare' ? companyCompare.activeRun?.runId : undefined
+        }
+        onRefreshCompareSessions={() => void refreshCompareSessions({ force: true })}
+        onOpenCompareRun={handleOpenCompareRun}
+        onOpenNewCompare={handleOpenNewCompare}
+        openToComparisons={openHistoryToComparisons}
+        onOpenToComparisonsHandled={handleOpenToComparisonsHandled}
       />
       <FollowUpConfirmModal
         isOpen={Boolean(followUpModal)}
@@ -220,18 +419,22 @@ const App: React.FC = () => {
       <Header
         onReset={handleReset}
         onToggleHistory={() => {
-          setIsHistoryOpen(true);
-          if (historyError) {
-            void refreshHistory();
-          }
+          handleToggleHistory();
+          trackEvent('history_open');
         }}
+        onOpenCompare={() => setCurrentView('compare')}
+        userEmail={auth.user?.email || null}
+        onSignOut={() => void auth.signOut()}
         language={language}
         onLanguageChange={handleLanguageChange}
         showNewAnalysisButton={showNewAnalysisButton}
         currentView={currentView}
-        onViewChange={handleViewChange}
+        onViewChange={FEATURE_BATCH_QUEUE ? handleViewChange : undefined}
+        showStepTimeline={showStepTimeline}
+        onToggleStepTimeline={currentView === 'single' ? handleToggleStepTimeline : undefined}
       />
       <main className="container mx-auto px-4 py-8">
+        <UsageBanner language={language} usage={auth.usage} />
         {saveStatus !== 'idle' && saveMessage && (
           <div className={`max-w-4xl mx-auto mb-4 rounded-lg border px-4 py-3 flex items-center justify-between ${
             saveStatus === 'success'
@@ -252,10 +455,42 @@ const App: React.FC = () => {
         <ModelSettingsPanel
           language={language}
           runtimeModelConfig={runtimeModelConfig}
-          onConfigReload={reloadRuntimeModelConfig}
+          onConfigApplied={applyRuntimeModelConfig}
         />
-        {currentView === 'batch' ? (
-          <BatchQueuePage language={language} />
+        {FEATURE_BATCH_QUEUE && currentView === 'batch' ? (
+          <BatchQueuePage
+            language={language}
+            queueStatus={queueStatus}
+            queueFetchError={queueFetchError}
+            onRefreshQueue={() => void fetchQueueStatus()}
+            submitBatchJob={submitBatchJob}
+            retryFailedJob={retryFailedJob}
+            onLoadReport={({ id, result }) => {
+              void loadFromHistory(id, result)
+                .then(() => {
+                  setCurrentView('single');
+                  window.setTimeout(() => void refreshHistory(), 500);
+                })
+                .catch(error => {
+                  console.error('Failed to load batch report:', error);
+                  alert(
+                    language === 'cn'
+                      ? `加载报告失败：${error instanceof Error ? error.message : '未知错误'}`
+                      : `Failed to load report: ${error instanceof Error ? error.message : 'Unknown error'}`
+                  );
+                });
+            }}
+            onRefreshHistory={() => void refreshHistory()}
+          />
+        ) : currentView === 'compare' ? (
+          <ComparePage
+            language={language}
+            history={history}
+            onLoadReport={handleLoadFromHistory}
+            compare={companyCompare}
+            onCompareSaved={() => void refreshCompareSessions({ force: true, silent: true })}
+            onOpenHistorySidebar={handleOpenCompareHistorySidebar}
+          />
         ) : (
           <>
             {showBatchStatus ? (
@@ -326,10 +561,18 @@ const App: React.FC = () => {
                 </div>
               </div>
             ) : null}
-            {analysisState.status === 'idle' && !showBatchStatus ? (
+            {analysisState.status === 'idle' && !showBatchStatus && !isOpeningReport ? (
               <SearchComponent onSearch={handleSearch} language={language} />
             ) : !showBatchStatus ? (
               <>
+                {isLoadingReportDetails && (
+                  <div className="max-w-4xl mx-auto mb-4 rounded-lg border border-blue-500/40 bg-blue-950/30 px-4 py-3 flex items-center gap-3">
+                    <div className="inline-block animate-spin rounded-full h-5 w-5 border-b-2 border-blue-400 shrink-0" />
+                    <p className="text-sm text-blue-200">
+                      {language === 'cn' ? '正在加载完整报告（含问答详情）…' : 'Loading full report details (including Q&A)…'}
+                    </p>
+                  </div>
+                )}
                 {viewingBaselineReport && (
                   <div className="max-w-4xl mx-auto mb-4 rounded-lg border border-gray-600 bg-gray-800/80 px-4 py-3 flex items-center justify-between">
                     <p className="text-sm text-gray-300">
@@ -349,8 +592,12 @@ const App: React.FC = () => {
                   analysisState={displayedAnalysisState}
                   language={language}
                   history={history}
+                  isLoadingReportDetails={isLoadingReportDetails}
                   onRetry={viewingBaselineReport ? undefined : retryLastAnalysis}
                   onFollowUpCompany={viewingBaselineReport ? undefined : handleFollowUpCompany}
+                  onStartCandidateAnalysis={
+                    viewingBaselineReport ? undefined : startCandidateAnalysis
+                  }
                   onViewParentReport={handleViewParentReport}
                   onViewInitialReport={handleViewInitialReport}
                   onLoadReport={handleLoadFromHistory}
@@ -362,6 +609,17 @@ const App: React.FC = () => {
           </>
         )}
       </main>
+      {showStepTimelinePanel && (
+        <section className="border-t border-gray-700 bg-gray-900/95">
+          <div className="container mx-auto px-4 py-6 max-w-4xl">
+            <h3 className="text-sm font-semibold text-gray-200 mb-4">{uiText.stepTimelineTitle}</h3>
+            <AnalysisStepTimeline
+              stepLogs={analysisState.stepLogs ?? []}
+              language={language}
+            />
+          </div>
+        </section>
+      )}
       <footer className="text-center py-4 text-gray-500 text-sm">
         {activeModels.analysis && (
           <p className="mb-1 text-xs text-gray-400">
@@ -370,7 +628,13 @@ const App: React.FC = () => {
         )}
         {activeModels.search && (
           <p className="mb-1 text-xs text-gray-400">
-            {language === 'cn' ? '当前搜索模型' : 'Active Search'}: <span className="font-semibold text-gray-300">{activeModels.search}</span>
+            {language === 'cn' ? '当前搜索' : 'Active Search'}:{' '}
+            <span className="font-semibold text-gray-300">{activeModels.search}</span>
+            {runtimeModelConfig.searchMode === 'advanced' && (
+              <span className="text-purple-300 ml-1">
+                · {language === 'cn' ? '高级（豆包+Google）' : 'Advanced (Doubao+Google)'}
+              </span>
+            )}
           </p>
         )}
         <p>Intelligent Stock Agent. For informational purposes only. Not financial advice.</p>

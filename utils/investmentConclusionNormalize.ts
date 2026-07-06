@@ -129,5 +129,10 @@ export const normalizeInvestmentConclusion = (raw: any): InvestmentConclusion =>
         sectionsRoot?.IndustryCycle ||
         sectionsRoot?.industryCycle
     ),
+    ExpectationGap: normalizeConclusionSection(
+      getConclusionSection(raw, ['ExpectationGap', 'expectationGap', 'expectation_gap']) ||
+        sectionsRoot?.ExpectationGap ||
+        sectionsRoot?.expectationGap
+    ),
   };
 };

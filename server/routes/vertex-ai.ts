@@ -2,6 +2,7 @@ import express from 'express';
 import { GoogleGenAI } from '@google/genai';
 import { getRuntimeModelConfig, setRuntimeModelConfig } from '../aiModelConfig.js';
 import { ModelClient, type ModelCallStep } from '../services/modelClient.js';
+import { requireAuth, requireAuthLite } from '../middleware/auth.js';
 
 const router = express.Router();
 
@@ -47,7 +48,7 @@ function getModelClient(): ModelClient {
 
 // POST /api/vertex-ai/generate-content
 // Proxy for Vertex AI generateContent requests
-router.post('/generate-content', async (req, res) => {
+router.post('/generate-content', requireAuth, async (req, res) => {
   try {
     const { model, provider, contents, config, step, requireGoogleSearch } = req.body;
 
@@ -107,13 +108,13 @@ router.post('/generate-content', async (req, res) => {
   }
 });
 
-router.get('/model-config', (req, res) => {
+router.get('/model-config', requireAuthLite, (req, res) => {
   res.status(200).json(getRuntimeModelConfig());
 });
 
-router.post('/model-config', (req, res) => {
+router.post('/model-config', requireAuthLite, (req, res) => {
   try {
-    const { analysis, search, questions, qna } = req.body || {};
+    const { analysis, search, questions, qna, searchMode } = req.body || {};
     const updated = setRuntimeModelConfig({
       analysis: {
         provider: analysis?.provider,
@@ -123,6 +124,7 @@ router.post('/model-config', (req, res) => {
         provider: search?.provider,
         model: search?.model,
       },
+      searchMode: searchMode === 'advanced' || searchMode === 'standard' ? searchMode : undefined,
       questions: {
         focus: typeof questions?.focus === 'number' ? questions.focus : undefined,
         candidate: typeof questions?.candidate === 'number' ? questions.candidate : undefined,
