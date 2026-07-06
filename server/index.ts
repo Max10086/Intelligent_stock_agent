@@ -17,6 +17,7 @@ import { resetStalledJobs } from './actions/process.js';
 import { checkDatabaseHealth, disconnectDatabase } from './db.js';
 import { getRuntimeModelConfig } from './aiModelConfig.js';
 import { getPublicSupabaseConfig } from './lib/publicEnv.js';
+import { getSupabaseUrl, isSupabaseAdminConfigured } from './lib/supabaseAdmin.js';
 import { searchTicker } from '../services/finance.js';
 
 // --- ESM 路径兼容处理 ---
@@ -73,8 +74,17 @@ app.get('/health/auth', (_req, res) => {
   }
   res.status(200).json({
     publicAuthConfigured: Boolean(supabaseUrl && supabaseAnonKey),
+    serverAuthConfigured: isSupabaseAdminConfigured(),
     hasServiceRoleKey: Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY),
     supabaseHost: urlHost,
+    serverSupabaseHost: (() => {
+      try {
+        const host = getSupabaseUrl();
+        return host ? new URL(host).host : null;
+      } catch {
+        return null;
+      }
+    })(),
   });
 });
 
@@ -136,6 +146,9 @@ const server = app.listen(PORT, HOST, async () => {
   const { supabaseUrl, supabaseAnonKey } = getPublicSupabaseConfig();
   console.log(
     `🔐 Supabase public auth: ${supabaseUrl && supabaseAnonKey ? 'configured' : 'NOT configured'} (browser loads via /api/public-config)`
+  );
+  console.log(
+    `🔐 Supabase server auth: ${isSupabaseAdminConfigured() ? 'configured' : 'NOT configured'} (API token verification)`
   );
 
   // Always recover zombie PROCESSING rows after restart (dev hot-reload, crash, etc.)

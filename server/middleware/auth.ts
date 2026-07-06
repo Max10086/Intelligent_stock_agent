@@ -1,6 +1,11 @@
 import type { NextFunction, Request, Response } from 'express';
 import type { AuthUser } from '../../types/auth.js';
-import { getSupabaseAdmin } from '../lib/supabaseAdmin.js';
+import { isSupabaseAdminConfigured } from '../lib/supabaseAdmin.js';
+import {
+  AuthConfigError,
+  AuthUpstreamError,
+  verifyAccessToken,
+} from '../lib/verifyAccessToken.js';
 import { ensureUserProfile } from '../services/userService.js';
 
 declare global {
@@ -18,6 +23,28 @@ const extractBearerToken = (req: Request): string | null => {
   return token || null;
 };
 
+const sendAuthFailure = (res: Response, error: unknown, label: string) => {
+  if (error instanceof AuthConfigError || !isSupabaseAdminConfigured()) {
+    console.error(`[auth] ${label} config error:`, error);
+    return res.status(503).json({
+      error: 'Supabase server auth is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.',
+    });
+  }
+
+  if (error instanceof AuthUpstreamError) {
+    if (/invalid|expired|jwt|token/i.test(error.message)) {
+      return res.status(401).json({ error: 'Invalid or expired session' });
+    }
+    console.error(`[auth] ${label} upstream error:`, error.message, error.upstreamCause || '');
+    return res.status(503).json({
+      error: 'Authentication service temporarily unavailable. Please retry.',
+    });
+  }
+
+  console.error(`[auth] ${label} failed:`, error);
+  return res.status(500).json({ error: 'Authentication failed' });
+};
+
 export const requireAuthLite = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const token = extractBearerToken(req);
@@ -25,20 +52,10 @@ export const requireAuthLite = async (req: Request, res: Response, next: NextFun
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    const supabase = getSupabaseAdmin();
-    const { data, error } = await supabase.auth.getUser(token);
-    if (error || !data.user?.id || !data.user.email) {
-      return res.status(401).json({ error: 'Invalid or expired session' });
-    }
-
-    req.user = {
-      id: data.user.id,
-      email: data.user.email,
-    };
+    req.user = await verifyAccessToken(token);
     next();
   } catch (error: any) {
-    console.error('[auth] requireAuthLite failed:', error);
-    res.status(500).json({ error: 'Authentication failed' });
+    return sendAuthFailure(res, error, 'requireAuthLite');
   }
 };
 
@@ -49,30 +66,27 @@ export const requireAuth = async (req: Request, res: Response, next: NextFunctio
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    const supabase = getSupabaseAdmin();
-    const { data, error } = await supabase.auth.getUser(token);
-    if (error || !data.user?.id || !data.user.email) {
-      return res.status(401).json({ error: 'Invalid or expired session' });
-    }
-
-    const authUser: AuthUser = {
-      id: data.user.id,
-      email: data.user.email,
-    };
+    const authUser = await verifyAccessToken(token);
     req.user = authUser;
 
-    const metadata = data.user.user_metadata || {};
-    await ensureUserProfile(authUser, {
-      displayName:
-        (typeof metadata.full_name === 'string' && metadata.full_name) ||
-        (typeof metadata.name === 'string' && metadata.name) ||
-        null,
-      avatarUrl: (typeof metadata.avatar_url === 'string' && metadata.avatar_url) || null,
-    });
+    try {
+      const metadata = authUser.userMetadata || {};
+      await ensureUserProfile(authUser, {
+        displayName:
+          (typeof metadata.full_name === 'string' && metadata.full_name) ||
+          (typeof metadata.name === 'string' && metadata.name) ||
+          null,
+        avatarUrl: (typeof metadata.avatar_url === 'string' && metadata.avatar_url) || null,
+      });
+    } catch (profileError: any) {
+      console.error('[auth] ensureUserProfile failed:', profileError);
+      return res.status(503).json({
+        error: 'Failed to sync user profile. Check database connectivity and migrations.',
+      });
+    }
 
     next();
   } catch (error: any) {
-    console.error('[auth] requireAuth failed:', error);
-    res.status(500).json({ error: 'Authentication failed' });
+    return sendAuthFailure(res, error, 'requireAuth');
   }
 };

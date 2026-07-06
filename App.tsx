@@ -86,7 +86,8 @@ const App: React.FC = () => {
     applyRuntimeModelConfig,
     reloadRuntimeModelConfig,
   } = useStockAgent({
-    historyFetchEnabled: auth.isAuthenticated && !auth.isLoading,
+    historyFetchEnabled:
+      auth.isAuthenticated && !auth.isLoading && Boolean(auth.user?.id ?? auth.session?.user?.id),
     userId: auth.user?.id ?? auth.session?.user?.id ?? null,
   });
   const { trackEvent } = useAnalytics();
