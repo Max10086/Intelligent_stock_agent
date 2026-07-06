@@ -17,11 +17,17 @@
     ENV DATABASE_URL="postgresql://dummy:dummy@localhost:5432/dummy"
     RUN npx prisma generate
     
-    # 5. 注入前端构建变量 (Cloud Build 构建时传入)
+    # 5. Optional build-time Supabase vars (local Docker). Cloud Run uses runtime /api/public-config.
     ARG NEXT_PUBLIC_SUPABASE_URL
+    ARG NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
     ARG NEXT_PUBLIC_SUPABASE_ANON_KEY
+    ARG VITE_SUPABASE_URL
+    ARG VITE_SUPABASE_ANON_KEY
     ENV NEXT_PUBLIC_SUPABASE_URL=$NEXT_PUBLIC_SUPABASE_URL
+    ENV NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=$NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
     ENV NEXT_PUBLIC_SUPABASE_ANON_KEY=$NEXT_PUBLIC_SUPABASE_ANON_KEY
+    ENV VITE_SUPABASE_URL=$VITE_SUPABASE_URL
+    ENV VITE_SUPABASE_ANON_KEY=$VITE_SUPABASE_ANON_KEY
     
     # 6. 构建前端 (Vite) -> 生成 dist 文件夹
     RUN npm run build

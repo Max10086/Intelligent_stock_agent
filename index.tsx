@@ -55,11 +55,18 @@ class ErrorBoundary extends React.Component<
 const rootElement = document.getElementById('root');
 if (rootElement) {
   const root = ReactDOM.createRoot(rootElement);
-  root.render(
-    <React.StrictMode>
-      <ErrorBoundary>
-        <App />
-      </ErrorBoundary>
-    </React.StrictMode>
-  );
+
+  async function bootstrap() {
+    const { loadPublicRuntimeConfig } = await import('./lib/publicRuntimeConfig.ts');
+    await loadPublicRuntimeConfig();
+    root.render(
+      <React.StrictMode>
+        <ErrorBoundary>
+          <App />
+        </ErrorBoundary>
+      </React.StrictMode>
+    );
+  }
+
+  void bootstrap();
 }

@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { Session } from '@supabase/supabase-js';
 import type { UsageSummary, UserProfile } from '../types/auth.ts';
-import { isSupabaseConfigured, supabaseClient } from '../lib/supabaseClient.ts';
+import { isSupabaseConfigured, getSupabaseClient } from '../lib/supabaseClient.ts';
+import { loadPublicRuntimeConfig } from '../lib/publicRuntimeConfig.ts';
 import { apiFetch, readApiError } from '../utils/authenticatedFetch.ts';
 import { setAuthTokenGetter } from '../utils/authenticatedFetch.ts';
 import { mapAuthError } from '../utils/authErrors.ts';
@@ -58,20 +59,23 @@ export const useAuth = () => {
   }, []);
 
   useEffect(() => {
-    if (!supabaseClient) {
-      setState(prev => ({
-        ...prev,
-        isLoading: false,
-        error: 'Supabase auth is not configured',
-      }));
-      return;
-    }
-
     let mounted = true;
+    let authSubscription: { unsubscribe: () => void } | null = null;
 
     const init = async () => {
-      if (!supabaseClient) return;
-      const { data } = await supabaseClient.auth.getSession();
+      await loadPublicRuntimeConfig();
+      const client = getSupabaseClient();
+      if (!client) {
+        if (!mounted) return;
+        setState(prev => ({
+          ...prev,
+          isLoading: false,
+          error: 'Supabase auth is not configured',
+        }));
+        return;
+      }
+
+      const { data } = await client.auth.getSession();
       if (!mounted) return;
       setState(prev => ({ ...prev, session: data.session, isLoading: false }));
       if (data.session) {
@@ -84,28 +88,29 @@ export const useAuth = () => {
           }));
         }
       }
+
+      const { data: subscription } = client.auth.onAuthStateChange((_event, session) => {
+        setState(prev => ({ ...prev, session }));
+        setAuthTokenGetter(() => session?.access_token || null);
+        if (session) {
+          void syncProfile(session).catch(error => {
+            setState(prev => ({
+              ...prev,
+              error: error instanceof Error ? error.message : 'Failed to sync profile',
+            }));
+          });
+        } else {
+          setState(prev => ({ ...prev, user: null, usage: null, error: null }));
+        }
+      });
+      authSubscription = subscription.subscription;
     };
 
     void init();
 
-    const { data: subscription } = supabaseClient.auth.onAuthStateChange((_event, session) => {
-      setState(prev => ({ ...prev, session }));
-      setAuthTokenGetter(() => session?.access_token || null);
-      if (session) {
-        void syncProfile(session).catch(error => {
-          setState(prev => ({
-            ...prev,
-            error: error instanceof Error ? error.message : 'Failed to sync profile',
-          }));
-        });
-      } else {
-        setState(prev => ({ ...prev, user: null, usage: null, error: null }));
-      }
-    });
-
     return () => {
       mounted = false;
-      subscription.subscription.unsubscribe();
+      authSubscription?.unsubscribe();
     };
   }, [syncProfile]);
 
@@ -114,9 +119,10 @@ export const useAuth = () => {
   }, [state.session?.access_token]);
 
   const signInWithGoogle = useCallback(async () => {
-    if (!supabaseClient) throw new Error('Supabase auth is not configured');
+    const client = getSupabaseClient();
+    if (!client) throw new Error('Supabase auth is not configured');
     const redirectTo = `${window.location.origin}${window.location.pathname}`;
-    const { error } = await supabaseClient.auth.signInWithOAuth({
+    const { error } = await client.auth.signInWithOAuth({
       provider: 'google',
       options: { redirectTo },
     });
@@ -124,7 +130,8 @@ export const useAuth = () => {
   }, []);
 
   const signInWithEmail = useCallback(async (email: string, password: string, language: Language) => {
-    if (!supabaseClient) throw new Error('Supabase auth is not configured');
+    const client = getSupabaseClient();
+    if (!client) throw new Error('Supabase auth is not configured');
 
     const normalizedEmail = normalizeEmail(email);
     if (!isValidEmail(normalizedEmail)) {
@@ -133,7 +140,7 @@ export const useAuth = () => {
     const passwordError = validatePassword(password, language);
     if (passwordError) throw new Error(passwordError);
 
-    const { error } = await supabaseClient.auth.signInWithPassword({
+    const { error } = await client.auth.signInWithPassword({
       email: normalizedEmail,
       password,
     });
@@ -165,7 +172,8 @@ export const useAuth = () => {
 
   const completeSignUp = useCallback(
     async (email: string, code: string, password: string, confirmPassword: string, language: Language) => {
-      if (!supabaseClient) throw new Error('Supabase auth is not configured');
+      const client = getSupabaseClient();
+      if (!client) throw new Error('Supabase auth is not configured');
 
       const normalizedEmail = normalizeEmail(email);
       const normalizedCode = normalizeOtpCode(code);
@@ -198,8 +206,9 @@ export const useAuth = () => {
   );
 
   const signOut = useCallback(async () => {
-    if (!supabaseClient) return;
-    await supabaseClient.auth.signOut();
+    const client = getSupabaseClient();
+    if (!client) return;
+    await client.auth.signOut();
     setState(prev => ({ ...prev, session: null, user: null, usage: null }));
   }, []);
 
@@ -209,7 +218,7 @@ export const useAuth = () => {
     () => ({
       ...state,
       isAuthenticated,
-      isConfigured: isSupabaseConfigured,
+      isConfigured: isSupabaseConfigured(),
       signInWithGoogle,
       sendSignUpCode,
       completeSignUp,

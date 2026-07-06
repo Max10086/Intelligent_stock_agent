@@ -16,6 +16,7 @@ import { startQueueWorker, stopQueueWorker } from './worker.js';
 import { resetStalledJobs } from './actions/process.js';
 import { checkDatabaseHealth, disconnectDatabase } from './db.js';
 import { getRuntimeModelConfig } from './aiModelConfig.js';
+import { getPublicSupabaseConfig } from './lib/publicEnv.js';
 import { searchTicker } from '../services/finance.js';
 
 // --- ESM 路径兼容处理 ---
@@ -48,6 +49,32 @@ app.get('/health/db', async (_req, res) => {
     latencyMs: result.latencyMs,
     poolMode: result.poolMode,
     ...(result.error ? { error: result.error } : {}),
+  });
+});
+
+/** Public runtime config for the browser (Cloud Run env vars — not baked into Vite build). */
+app.get('/api/public-config', (_req, res) => {
+  const { supabaseUrl, supabaseAnonKey } = getPublicSupabaseConfig();
+  res.set('Cache-Control', 'no-store');
+  res.status(200).json({
+    supabaseUrl,
+    supabaseAnonKey,
+    authConfigured: Boolean(supabaseUrl && supabaseAnonKey),
+  });
+});
+
+app.get('/health/auth', (_req, res) => {
+  const { supabaseUrl, supabaseAnonKey } = getPublicSupabaseConfig();
+  let urlHost: string | null = null;
+  try {
+    urlHost = supabaseUrl ? new URL(supabaseUrl).host : null;
+  } catch {
+    urlHost = null;
+  }
+  res.status(200).json({
+    publicAuthConfigured: Boolean(supabaseUrl && supabaseAnonKey),
+    hasServiceRoleKey: Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY),
+    supabaseHost: urlHost,
   });
 });
 
@@ -106,6 +133,10 @@ app.get('*', (req, res) => {
 const server = app.listen(PORT, HOST, async () => {
   console.log(`🚀 Backend server running on http://${HOST}:${PORT}`);
   console.log(`📂 Serving static files from: ${distPath}`);
+  const { supabaseUrl, supabaseAnonKey } = getPublicSupabaseConfig();
+  console.log(
+    `🔐 Supabase public auth: ${supabaseUrl && supabaseAnonKey ? 'configured' : 'NOT configured'} (browser loads via /api/public-config)`
+  );
 
   // Always recover zombie PROCESSING rows after restart (dev hot-reload, crash, etc.)
   await resetStalledJobs();
