@@ -1,4 +1,5 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import ws from 'ws';
 import {
   formatMissingSupabaseEnvHint,
   getSupabaseEnvStatus,
@@ -27,6 +28,8 @@ export const getSupabaseAdmin = (): SupabaseClient => {
   }
   adminClient = createClient(url, key, {
     auth: { persistSession: false, autoRefreshToken: false },
+    // Node.js 20 (Cloud Run) has no native WebSocket — required by @supabase/supabase-js realtime client.
+    realtime: { transport: ws as unknown as typeof WebSocket },
   });
   return adminClient;
 };
