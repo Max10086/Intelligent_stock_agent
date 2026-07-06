@@ -16,8 +16,7 @@ import { startQueueWorker, stopQueueWorker } from './worker.js';
 import { resetStalledJobs } from './actions/process.js';
 import { checkDatabaseHealth, disconnectDatabase } from './db.js';
 import { getRuntimeModelConfig } from './aiModelConfig.js';
-import { getPublicSupabaseConfig } from './lib/publicEnv.js';
-import { getSupabaseUrl, isSupabaseAdminConfigured } from './lib/supabaseAdmin.js';
+import { getPublicSupabaseConfig, getSupabaseEnvStatus } from './lib/publicEnv.js';
 import { searchTicker } from '../services/finance.js';
 
 // --- ESM 路径兼容处理 ---
@@ -65,26 +64,25 @@ app.get('/api/public-config', (_req, res) => {
 });
 
 app.get('/health/auth', (_req, res) => {
-  const { supabaseUrl, supabaseAnonKey } = getPublicSupabaseConfig();
+  const publicConfig = getPublicSupabaseConfig();
+  const envStatus = getSupabaseEnvStatus();
   let urlHost: string | null = null;
   try {
-    urlHost = supabaseUrl ? new URL(supabaseUrl).host : null;
+    urlHost = publicConfig.supabaseUrl ? new URL(publicConfig.supabaseUrl).host : null;
   } catch {
     urlHost = null;
   }
   res.status(200).json({
-    publicAuthConfigured: Boolean(supabaseUrl && supabaseAnonKey),
-    serverAuthConfigured: isSupabaseAdminConfigured(),
-    hasServiceRoleKey: Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY),
+    publicAuthConfigured: Boolean(publicConfig.supabaseUrl && publicConfig.supabaseAnonKey),
+    serverAuthConfigured: envStatus.serverAuthReady,
+    env: {
+      hasSupabaseUrl: envStatus.hasUrl,
+      hasPublishableKey: envStatus.hasAnonKey,
+      hasServiceRoleKey: envStatus.hasServiceRoleKey,
+      usingServiceRoleForApiAuth: envStatus.hasServiceRoleKey,
+      usingPublishableKeyFallback: !envStatus.hasServiceRoleKey && envStatus.hasAnonKey,
+    },
     supabaseHost: urlHost,
-    serverSupabaseHost: (() => {
-      try {
-        const host = getSupabaseUrl();
-        return host ? new URL(host).host : null;
-      } catch {
-        return null;
-      }
-    })(),
   });
 });
 
@@ -143,13 +141,17 @@ app.get('*', (req, res) => {
 const server = app.listen(PORT, HOST, async () => {
   console.log(`🚀 Backend server running on http://${HOST}:${PORT}`);
   console.log(`📂 Serving static files from: ${distPath}`);
-  const { supabaseUrl, supabaseAnonKey } = getPublicSupabaseConfig();
+  const envStatus = getSupabaseEnvStatus();
   console.log(
-    `🔐 Supabase public auth: ${supabaseUrl && supabaseAnonKey ? 'configured' : 'NOT configured'} (browser loads via /api/public-config)`
+    `🔐 Supabase public auth: ${envStatus.hasUrl && envStatus.hasAnonKey ? 'configured' : 'NOT configured'} (browser via /api/public-config)`
   );
   console.log(
-    `🔐 Supabase server auth: ${isSupabaseAdminConfigured() ? 'configured' : 'NOT configured'} (API token verification)`
+    `🔐 Supabase server auth: ${envStatus.serverAuthReady ? 'configured' : 'NOT configured'} ` +
+      `(url=${envStatus.hasUrl}, serviceRole=${envStatus.hasServiceRoleKey}, publishable=${envStatus.hasAnonKey})`
   );
+  if (envStatus.serverAuthReady && !envStatus.hasServiceRoleKey) {
+    console.warn('⚠️  SUPABASE_SERVICE_ROLE_KEY not set — using publishable/anon key for API JWT verification.');
+  }
 
   // Always recover zombie PROCESSING rows after restart (dev hot-reload, crash, etc.)
   await resetStalledJobs();

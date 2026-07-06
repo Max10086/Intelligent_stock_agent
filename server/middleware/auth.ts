@@ -1,6 +1,6 @@
 import type { NextFunction, Request, Response } from 'express';
 import type { AuthUser } from '../../types/auth.js';
-import { isSupabaseAdminConfigured } from '../lib/supabaseAdmin.js';
+import { formatMissingSupabaseEnvHint } from '../lib/publicEnv.js';
 import {
   AuthConfigError,
   AuthUpstreamError,
@@ -24,10 +24,10 @@ const extractBearerToken = (req: Request): string | null => {
 };
 
 const sendAuthFailure = (res: Response, error: unknown, label: string) => {
-  if (error instanceof AuthConfigError || !isSupabaseAdminConfigured()) {
-    console.error(`[auth] ${label} config error:`, error);
+  if (error instanceof AuthConfigError) {
+    console.error(`[auth] ${label} config error:`, error.message);
     return res.status(503).json({
-      error: 'Supabase server auth is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.',
+      error: error.message || formatMissingSupabaseEnvHint(),
     });
   }
 
@@ -54,7 +54,7 @@ export const requireAuthLite = async (req: Request, res: Response, next: NextFun
 
     req.user = await verifyAccessToken(token);
     next();
-  } catch (error: any) {
+  } catch (error: unknown) {
     return sendAuthFailure(res, error, 'requireAuthLite');
   }
 };
@@ -78,7 +78,7 @@ export const requireAuth = async (req: Request, res: Response, next: NextFunctio
           null,
         avatarUrl: (typeof metadata.avatar_url === 'string' && metadata.avatar_url) || null,
       });
-    } catch (profileError: any) {
+    } catch (profileError: unknown) {
       console.error('[auth] ensureUserProfile failed:', profileError);
       return res.status(503).json({
         error: 'Failed to sync user profile. Check database connectivity and migrations.',
@@ -86,7 +86,7 @@ export const requireAuth = async (req: Request, res: Response, next: NextFunctio
     }
 
     next();
-  } catch (error: any) {
+  } catch (error: unknown) {
     return sendAuthFailure(res, error, 'requireAuth');
   }
 };
