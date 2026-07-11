@@ -36,11 +36,15 @@ export const BrandMark: React.FC<BrandMarkProps> = ({ language, variant, classNa
 
   if (variant === 'login') {
     return (
-      <div className={className}>
-        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-blue-400/90">
+      <div className={`text-center ${className}`}>
+        <h1 className="text-3xl sm:text-4xl font-extrabold text-white tracking-tight">
           {ui.brandName}
-        </p>
-        <h1 className="mt-1 text-2xl font-bold text-white">{ui.productSubtitle}</h1>
+        </h1>
+        <div className="mt-3 sm:mt-4 px-1">
+          <p className="text-xl sm:text-2xl font-bold tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-blue-400 via-sky-300 to-cyan-300 drop-shadow-[0_0_18px_rgba(56,189,248,0.35)]">
+            {ui.productSubtitle}
+          </p>
+        </div>
       </div>
     );
   }

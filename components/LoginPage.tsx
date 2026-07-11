@@ -124,7 +124,6 @@ export const LoginPage: React.FC<LoginPageProps> = ({
     <div className="min-h-screen bg-gray-900 text-gray-100 flex items-center justify-center px-4">
       <div className="w-full max-w-md rounded-2xl border border-gray-700 bg-gray-800/80 p-8 shadow-2xl">
         <BrandMark language={language} variant="login" />
-        <p className="mt-2 text-sm text-gray-400">{ui.loginSubtitle}</p>
 
         <div className="mt-6 grid grid-cols-2 gap-2 rounded-lg bg-gray-900/60 p-1">
           <button
@@ -326,8 +325,6 @@ export const LoginPage: React.FC<LoginPageProps> = ({
           <span className="text-lg">G</span>
           {isBusy ? ui.loginSigningIn : ui.loginWithGoogle}
         </button>
-
-        <p className="mt-4 text-xs text-gray-500 leading-relaxed">{ui.loginTrialHint}</p>
       </div>
     </div>
   );
