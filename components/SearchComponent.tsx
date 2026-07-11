@@ -1,14 +1,25 @@
 import React, { useState } from 'react';
-import { Language } from '../types.ts';
+import { Language, RuntimeModelConfig } from '../types.ts';
 import { getUIText } from '../constants.ts';
+import { BrandMark } from './BrandMark.tsx';
 import { SearchIcon } from './icons.tsx';
+import { AnalysisModeSplitButton } from './AnalysisModeSplitButton.tsx';
 
 interface SearchComponentProps {
   onSearch: (query: string) => void | Promise<void>;
   language: Language;
+  runtimeModelConfig: RuntimeModelConfig;
+  onConfigApplied: (config: RuntimeModelConfig) => void;
+  isAdmin?: boolean;
 }
 
-export const SearchComponent: React.FC<SearchComponentProps> = ({ onSearch, language }) => {
+export const SearchComponent: React.FC<SearchComponentProps> = ({
+  onSearch,
+  language,
+  runtimeModelConfig,
+  onConfigApplied,
+  isAdmin = false,
+}) => {
   const [query, setQuery] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const uiText = getUIText(language);
@@ -22,36 +33,37 @@ export const SearchComponent: React.FC<SearchComponentProps> = ({ onSearch, lang
   };
 
   return (
-    <div className="max-w-2xl mx-auto text-center py-16 lg:py-24 fade-in">
-      <h2 className="text-4xl font-extrabold text-white sm:text-5xl lg:text-6xl tracking-tight">
-        {uiText.title}
-      </h2>
-      <p className="mt-4 text-lg text-gray-400">{uiText.searchSubtitle}</p>
-      <form onSubmit={handleSubmit} className="mt-10 max-w-xl mx-auto">
-        <div className="relative">
-          <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-            <SearchIcon className="h-5 w-5 text-gray-400" />
+    <section className="w-full max-w-6xl mx-auto px-2 sm:px-4 fade-in">
+      <BrandMark language={language} variant="hero" />
+
+      <form onSubmit={handleSubmit} className="mt-10 sm:mt-12">
+        <div className="flex flex-col sm:flex-row sm:items-stretch gap-3 sm:gap-2 sm:rounded-2xl sm:border sm:border-gray-600/80 sm:bg-gray-800/60 sm:p-2 sm:shadow-[0_8px_32px_rgba(0,0,0,0.35)]">
+          <div className="relative flex-1 min-w-0">
+            <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+              <SearchIcon className="h-5 w-5 text-gray-400" />
+            </div>
+            <input
+              type="text"
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              className="w-full pl-11 pr-4 py-4 text-lg bg-gray-800 border border-gray-600 rounded-xl sm:rounded-lg sm:border-0 sm:bg-gray-900/50 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 sm:focus:ring-1"
+              placeholder={uiText.searchPlaceholder}
+              aria-label={uiText.searchPlaceholder}
+            />
           </div>
-          <input
-            type="text"
-            value={query}
-            onChange={e => setQuery(e.target.value)}
-            className="w-full pl-10 pr-4 py-3 text-lg bg-gray-800 border border-gray-600 rounded-md text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-            placeholder={uiText.searchPlaceholder}
-            aria-label={uiText.searchPlaceholder}
+
+          <AnalysisModeSplitButton
+            language={language}
+            runtimeModelConfig={runtimeModelConfig}
+            onConfigApplied={onConfigApplied}
+            isAdmin={isAdmin}
+            submitLabel={uiText.searchButton}
+            submittingLabel={uiText.startingSearch}
+            isSubmitting={isSubmitting}
+            canSubmit={Boolean(query.trim())}
           />
         </div>
-
-        <div className="mt-6 flex justify-center">
-          <button
-            type="submit"
-            disabled={!query.trim() || isSubmitting}
-            className="px-8 py-3 text-lg font-semibold text-white bg-blue-600 rounded-md hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-gray-900 focus:ring-blue-500 transition-all transform hover:scale-105 disabled:transform-none"
-          >
-            {isSubmitting ? uiText.startingSearch : uiText.searchButton}
-          </button>
-        </div>
       </form>
-    </div>
+    </section>
   );
 };

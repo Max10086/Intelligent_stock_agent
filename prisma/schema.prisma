@@ -36,6 +36,8 @@ model User {
   avatarUrl   String?
   isPaid      Boolean  @default(false)
   paidUntil   DateTime?
+  paypalSubscriptionId String? @unique
+  subscriptionStatus String?
   isAdmin     Boolean  @default(false)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt

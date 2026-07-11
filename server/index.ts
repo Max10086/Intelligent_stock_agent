@@ -9,6 +9,7 @@ import { historyRouter } from './routes/history.js';
 import { compareRouter } from './routes/compare.js';
 import { returnTrackingRouter } from './routes/returnTracking.js';
 import { authRouter } from './routes/auth.js';
+import { billingRouter, handlePayPalWebhook } from './routes/billing.js';
 import { usageRouter } from './routes/usage.js';
 import { analyticsRouter } from './routes/analytics.js';
 import { requireAuth } from './middleware/auth.js';
@@ -34,6 +35,15 @@ app.use(
     credentials: true,
   })
 );
+// PayPal webhooks need the raw body (must register before express.json)
+app.post(
+  '/api/billing/paypal/webhook',
+  express.raw({ type: 'application/json' }),
+  (req, res) => {
+    void handlePayPalWebhook(req, res);
+  }
+);
+
 // Full analysis reports (multi-company Q&A) can exceed Express's default 100kb limit
 app.use(express.json({ limit: '10mb' }));
 
@@ -117,6 +127,7 @@ app.get('/api/search-ticker', requireAuth, async (req, res) => {
 
 // --- 1. API 路由 ---
 app.use('/api/auth', authRouter);
+app.use('/api/billing', billingRouter);
 app.use('/api/usage', usageRouter);
 app.use('/api/analytics', analyticsRouter);
 app.use('/api/vertex-ai', vertexAIRouter);

@@ -225,7 +225,8 @@ export const useAuth = () => {
       signInWithEmail,
       signOut,
       refreshUsage,
+      refreshProfile: syncProfile,
     }),
-    [state, isAuthenticated, signInWithGoogle, sendSignUpCode, completeSignUp, signInWithEmail, signOut, refreshUsage]
+    [state, isAuthenticated, signInWithGoogle, sendSignUpCode, completeSignUp, signInWithEmail, signOut, refreshUsage, syncProfile]
   );
 };

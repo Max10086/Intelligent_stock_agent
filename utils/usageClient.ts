@@ -8,7 +8,11 @@ export const checkUsageQuota = async (requestedCompanies = 1): Promise<UsageSumm
   });
   const payload = await response.json();
   if (!response.ok) {
-    throw new Error(payload.error || (await readApiError(response)));
+    const error = new Error(payload.error || (await readApiError(response))) as Error & {
+      usage?: UsageSummary;
+    };
+    if (payload.usage) error.usage = payload.usage as UsageSummary;
+    throw error;
   }
   return payload.usage as UsageSummary;
 };

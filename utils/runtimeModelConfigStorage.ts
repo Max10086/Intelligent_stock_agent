@@ -1,20 +1,37 @@
-import { RuntimeModelConfig, SearchMode } from '../types.ts';
+import { RuntimeModelConfig, SearchMode, AnalysisPreset } from '../types.ts';
 import { apiFetch } from './authenticatedFetch.ts';
 
-export const RUNTIME_MODEL_CONFIG_STORAGE_KEY = 'intelligentStockAgentRuntimeModelConfigV8';
+export const RUNTIME_MODEL_CONFIG_STORAGE_KEY = 'intelligentStockAgentRuntimeModelConfigV9';
 
-/** System-wide default: DeepSeek analysis + Doubao search, 18/18 questions, thinking off. */
-export const DEFAULT_RUNTIME_MODEL_CONFIG: RuntimeModelConfig = {
-  analysis: { provider: 'deepseek', model: 'deepseek-v4-pro' },
-  search: { provider: 'doubao', model: 'deepseek-v4-pro' },
-  searchMode: 'standard',
+export const STANDARD_ANALYSIS_MODEL = 'deepseek-v4-pro';
+export const QUICK_ANALYSIS_MODEL = 'deepseek-v4-flash';
+
+const SHARED_RUNTIME_DEFAULTS = {
+  search: { provider: 'doubao' as const, model: STANDARD_ANALYSIS_MODEL },
   questions: { focus: 18, candidate: 18 },
   qna: { thinkingEnabled: false },
 };
 
-export const STANDARD_MODE_CONFIG: RuntimeModelConfig = { ...DEFAULT_RUNTIME_MODEL_CONFIG, searchMode: 'standard' };
+/** System-wide default: quick analysis (Flash) + Doubao search. */
+export const DEFAULT_RUNTIME_MODEL_CONFIG: RuntimeModelConfig = {
+  ...SHARED_RUNTIME_DEFAULTS,
+  analysis: { provider: 'deepseek', model: QUICK_ANALYSIS_MODEL },
+  searchMode: 'standard',
+};
 
-export const ADVANCED_MODE_CONFIG: RuntimeModelConfig = { ...DEFAULT_RUNTIME_MODEL_CONFIG, searchMode: 'advanced' };
+export const STANDARD_MODE_CONFIG: RuntimeModelConfig = {
+  ...SHARED_RUNTIME_DEFAULTS,
+  analysis: { provider: 'deepseek', model: STANDARD_ANALYSIS_MODEL },
+  searchMode: 'standard',
+};
+
+export const QUICK_MODE_CONFIG: RuntimeModelConfig = { ...DEFAULT_RUNTIME_MODEL_CONFIG };
+
+export const ADVANCED_MODE_CONFIG: RuntimeModelConfig = {
+  ...SHARED_RUNTIME_DEFAULTS,
+  analysis: { provider: 'deepseek', model: STANDARD_ANALYSIS_MODEL },
+  searchMode: 'advanced',
+};
 
 /** Bump legacy persisted defaults when app defaults were raised (e.g. 10 → 18, 15 → 18). */
 export const migrateLegacyQuestionCounts = (
@@ -113,14 +130,19 @@ export const normalizeRuntimeModelConfig = (
   };
 };
 
+const readLegacyStoredConfig = (): string | null => {
+  if (typeof window === 'undefined') return null;
+  return (
+    localStorage.getItem(RUNTIME_MODEL_CONFIG_STORAGE_KEY) ||
+    localStorage.getItem('intelligentStockAgentRuntimeModelConfigV8') ||
+    localStorage.getItem('intelligentStockAgentRuntimeModelConfigV7')
+  );
+};
+
 export const loadStoredRuntimeModelConfig = (
   fallback: RuntimeModelConfig = DEFAULT_RUNTIME_MODEL_CONFIG
 ): RuntimeModelConfig | null => {
-  if (typeof window === 'undefined') return null;
-  let raw = localStorage.getItem(RUNTIME_MODEL_CONFIG_STORAGE_KEY);
-  if (!raw) {
-    raw = localStorage.getItem('intelligentStockAgentRuntimeModelConfigV7');
-  }
+  const raw = readLegacyStoredConfig();
   if (!raw) return null;
   try {
     const normalized = normalizeRuntimeModelConfig(JSON.parse(raw), fallback);
@@ -172,5 +194,46 @@ export const pushRuntimeModelConfigToBackend = async (
   throw lastError instanceof Error ? lastError : new Error('Failed to sync model config to backend');
 };
 
+/** Prefer browser-stored (last applied) config; push it to the server so batch jobs match the UI. */
+export const resolveAuthoritativeRuntimeModelConfig = (
+  fallback: RuntimeModelConfig = DEFAULT_RUNTIME_MODEL_CONFIG
+): RuntimeModelConfig => {
+  const stored = loadStoredRuntimeModelConfig(fallback);
+  const next = stored ?? fallback;
+  const normalized = normalizeRuntimeModelConfig(next, fallback);
+  const { config } = migrateRuntimeModelConfig(normalized);
+  return config;
+};
+
+export const syncAuthoritativeRuntimeModelConfig = async (
+  apiBaseUrl = '',
+  fallback: RuntimeModelConfig = DEFAULT_RUNTIME_MODEL_CONFIG
+): Promise<RuntimeModelConfig> => {
+  const authoritative = resolveAuthoritativeRuntimeModelConfig(fallback);
+  saveStoredRuntimeModelConfig(authoritative);
+
+  try {
+    const synced = await pushRuntimeModelConfigToBackend(authoritative, apiBaseUrl);
+    saveStoredRuntimeModelConfig(synced);
+    return synced;
+  } catch (error) {
+    console.warn('Failed to sync authoritative model config to backend:', error);
+    return authoritative;
+  }
+};
+
 export const configForSearchMode = (mode: SearchMode): RuntimeModelConfig =>
   mode === 'advanced' ? { ...ADVANCED_MODE_CONFIG } : { ...STANDARD_MODE_CONFIG };
+
+export const configForPreset = (preset: AnalysisPreset): RuntimeModelConfig => {
+  if (preset === 'quick') return { ...QUICK_MODE_CONFIG };
+  if (preset === 'advanced') return { ...ADVANCED_MODE_CONFIG };
+  return { ...STANDARD_MODE_CONFIG };
+};
+
+export const presetFromConfig = (config: RuntimeModelConfig): AnalysisPreset => {
+  if (config.searchMode === 'advanced') return 'advanced';
+  const analysisModel = (config.analysis?.model || '').trim().toLowerCase();
+  if (analysisModel === QUICK_ANALYSIS_MODEL) return 'quick';
+  return 'standard';
+};

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import type { Language } from '../types.ts';
 import { getUIText } from '../constants.ts';
+import { BrandMark } from './BrandMark.tsx';
 import { isValidEmail } from '../utils/authValidation.ts';
 
 type AuthTab = 'signIn' | 'signUp';
@@ -122,7 +123,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
   return (
     <div className="min-h-screen bg-gray-900 text-gray-100 flex items-center justify-center px-4">
       <div className="w-full max-w-md rounded-2xl border border-gray-700 bg-gray-800/80 p-8 shadow-2xl">
-        <h1 className="text-2xl font-bold text-white">{ui.title}</h1>
+        <BrandMark language={language} variant="login" />
         <p className="mt-2 text-sm text-gray-400">{ui.loginSubtitle}</p>
 
         <div className="mt-6 grid grid-cols-2 gap-2 rounded-lg bg-gray-900/60 p-1">

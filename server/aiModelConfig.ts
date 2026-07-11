@@ -43,7 +43,7 @@ export const SEARCH_MODEL =
 export const ANALYSIS_MODEL_PROVIDER = normalizeProvider(process.env.ANALYSIS_MODEL_PROVIDER, 'deepseek');
 export const ANALYSIS_MODEL =
   (process.env.ANALYSIS_MODEL && process.env.ANALYSIS_MODEL.trim()) ||
-  (ANALYSIS_MODEL_PROVIDER === 'deepseek' ? 'deepseek-v4-pro' : SEARCH_MODEL);
+  (ANALYSIS_MODEL_PROVIDER === 'deepseek' ? 'deepseek-v4-flash' : SEARCH_MODEL);
 
 // Question count controls.
 export const FOCUS_QUESTION_COUNT = Math.max(5, toInt(process.env.FOCUS_QUESTION_COUNT, 18));
@@ -189,7 +189,7 @@ function loadPersistedRuntimeOverrides(): RuntimeOverride {
 
 let runtimeOverrides: RuntimeOverride = loadPersistedRuntimeOverrides();
 
-/** Cloud Run / server env vars pin defaults; they beat persisted .runtime-model-config.json. */
+/** Env vars seed defaults; per-user runtime overrides from the UI take precedence when set. */
 const envPinnedSearchProvider = process.env.SEARCH_MODEL_PROVIDER?.trim()
   ? normalizeSearchProvider(process.env.SEARCH_MODEL_PROVIDER, SEARCH_MODEL_PROVIDER)
   : undefined;
@@ -202,14 +202,18 @@ const envPinnedAnalysisModel = cleanModel(process.env.ANALYSIS_MODEL);
 export const getRuntimeModelConfig = () => ({
   search: {
     provider:
-      envPinnedSearchProvider || runtimeOverrides.search?.provider || SEARCH_MODEL_PROVIDER,
-    model: envPinnedSearchModel || runtimeOverrides.search?.model || SEARCH_MODEL,
+      runtimeOverrides.search?.provider ||
+      envPinnedSearchProvider ||
+      SEARCH_MODEL_PROVIDER,
+    model: runtimeOverrides.search?.model || envPinnedSearchModel || SEARCH_MODEL,
   },
   searchMode: runtimeOverrides.searchMode || DEFAULT_SEARCH_MODE,
   analysis: {
     provider:
-      envPinnedAnalysisProvider || runtimeOverrides.analysis?.provider || ANALYSIS_MODEL_PROVIDER,
-    model: envPinnedAnalysisModel || runtimeOverrides.analysis?.model || ANALYSIS_MODEL,
+      runtimeOverrides.analysis?.provider ||
+      envPinnedAnalysisProvider ||
+      ANALYSIS_MODEL_PROVIDER,
+    model: runtimeOverrides.analysis?.model || envPinnedAnalysisModel || ANALYSIS_MODEL,
   },
   questions: {
     focus: runtimeOverrides.questions?.focus || FOCUS_QUESTION_COUNT,

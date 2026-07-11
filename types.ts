@@ -3,6 +3,7 @@ export type Language = 'en' | 'cn';
 export type ModelProvider = 'vertex' | 'deepseek';
 export type SearchProvider = 'vertex' | 'doubao';
 export type SearchMode = 'standard' | 'advanced';
+export type AnalysisPreset = 'standard' | 'quick' | 'advanced';
 
 export interface CompanyProfile {
   name: string;

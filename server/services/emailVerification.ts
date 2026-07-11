@@ -27,16 +27,16 @@ const createTransport = () => {
 const buildVerificationEmail = (code: string, language: Language) => {
   const subject =
     language === 'cn'
-      ? `【智能股票投研助手】注册验证码 ${code}`
-      : `[Intelligent Stock Agent] Verification code ${code}`;
+      ? `【Trade Alpha】注册验证码 ${code}`
+      : `[Trade Alpha] Verification code ${code}`;
   const text =
     language === 'cn'
-      ? `您的注册验证码是：${code}\n\n验证码 10 分钟内有效，请勿泄露给他人。`
-      : `Your verification code is: ${code}\n\nThis code expires in 10 minutes. Do not share it with anyone.`;
+      ? `Trade Alpha · 智能股票投研助手\n\n您的注册验证码是：${code}\n\n验证码 10 分钟内有效，请勿泄露给他人。`
+      : `Trade Alpha · Intelligent Stock Agent\n\nYour verification code is: ${code}\n\nThis code expires in 10 minutes. Do not share it with anyone.`;
   const html =
     language === 'cn'
-      ? `<p>您的注册验证码是：</p><p style="font-size:28px;font-weight:700;letter-spacing:4px">${code}</p><p>验证码 10 分钟内有效，请勿泄露给他人。</p>`
-      : `<p>Your verification code is:</p><p style="font-size:28px;font-weight:700;letter-spacing:4px">${code}</p><p>This code expires in 10 minutes. Do not share it with anyone.</p>`;
+      ? `<p><strong>Trade Alpha</strong> · 智能股票投研助手</p><p>您的注册验证码是：</p><p style="font-size:28px;font-weight:700;letter-spacing:4px">${code}</p><p>验证码 10 分钟内有效，请勿泄露给他人。</p>`
+      : `<p><strong>Trade Alpha</strong> · Intelligent Stock Agent</p><p>Your verification code is:</p><p style="font-size:28px;font-weight:700;letter-spacing:4px">${code}</p><p>This code expires in 10 minutes. Do not share it with anyone.</p>`;
   return { subject, text, html };
 };
 
@@ -47,7 +47,7 @@ export const sendRegistrationVerificationEmail = async (
 ): Promise<EmailDeliveryResult> => {
   const { subject, text, html } = buildVerificationEmail(code, language);
   const from =
-    process.env.SMTP_FROM || process.env.SMTP_USER || 'noreply@intelligent-stock-agent.local';
+    process.env.SMTP_FROM || process.env.SMTP_USER || 'noreply@tradealpha.cc';
 
   if (isSmtpConfigured()) {
     const transport = createTransport();

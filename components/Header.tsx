@@ -1,8 +1,11 @@
 
 import React from 'react';
 import { HistoryIcon } from './icons.tsx';
+import { BrandMark } from './BrandMark.tsx';
 import { Language } from '../types.ts';
 import { getUIText } from '../constants.ts';
+import type { SubscriptionSummary } from '../types/auth.ts';
+import { MemberProBadge } from './MemberProBadge.tsx';
 
 interface HeaderProps {
   onReset: () => void;
@@ -18,6 +21,11 @@ interface HeaderProps {
   onToggleStepTimeline?: () => void;
   userEmail?: string | null;
   onSignOut?: () => void;
+  onUpgrade?: () => void;
+  showUpgradeButton?: boolean;
+  isPaidMember?: boolean;
+  subscription?: SubscriptionSummary | null;
+  isSubscriptionLoading?: boolean;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -33,12 +41,13 @@ export const Header: React.FC<HeaderProps> = ({
   onToggleStepTimeline,
   userEmail,
   onSignOut,
+  onUpgrade,
+  showUpgradeButton = false,
+  isPaidMember = false,
+  subscription = null,
+  isSubscriptionLoading = false,
 }) => {
   const uiText = getUIText(language);
-
-  const toggleLanguage = () => {
-    onLanguageChange(language === 'en' ? 'cn' : 'en');
-  };
 
   return (
     <header className="bg-gray-900/80 backdrop-blur-sm sticky top-0 z-20 border-b border-gray-700">
@@ -52,9 +61,7 @@ export const Header: React.FC<HeaderProps> = ({
           >
             <HistoryIcon className="w-6 h-6 text-gray-300" />
           </button>
-          <h1 className="text-xl font-bold text-gray-100 tracking-tight hidden sm:block">
-            {uiText.title}
-          </h1>
+          <BrandMark language={language} variant="header" className="hidden sm:block" />
         </div>
         <div className="flex items-center gap-2 sm:gap-3">
           {onViewChange && (
@@ -104,6 +111,23 @@ export const Header: React.FC<HeaderProps> = ({
               {uiText.viewCompare}
             </button>
           )}
+          {showUpgradeButton && onUpgrade && (
+            <button
+              type="button"
+              onClick={onUpgrade}
+              className="px-3 py-2 text-sm font-semibold text-gray-900 bg-amber-400 rounded-md hover:bg-amber-300"
+            >
+              {uiText.upgrade}
+            </button>
+          )}
+          {isPaidMember && (
+            <MemberProBadge
+              language={language}
+              subscription={subscription}
+              isLoading={isSubscriptionLoading}
+              active={isPaidMember}
+            />
+          )}
           {userEmail && (
             <span className="hidden md:inline text-xs text-gray-400 max-w-[160px] truncate" title={userEmail}>
               {userEmail}
@@ -118,14 +142,36 @@ export const Header: React.FC<HeaderProps> = ({
               {uiText.signOut}
             </button>
           )}
-          <button
-            type="button"
-            onClick={toggleLanguage}
-            className="px-3 py-2 text-sm font-medium text-gray-200 bg-gray-700 rounded-md hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-gray-900 focus:ring-blue-500 transition-colors"
-            aria-label={uiText.languageToggle}
+          <div
+            className="flex bg-gray-700 rounded-md p-1"
+            role="group"
+            aria-label={language === 'cn' ? '选择语言' : 'Select language'}
           >
-            {uiText.languageToggle}
-          </button>
+            <button
+              type="button"
+              onClick={() => onLanguageChange('cn')}
+              className={`px-2 sm:px-3 py-1 text-xs sm:text-sm font-medium rounded transition-colors ${
+                language === 'cn'
+                  ? 'bg-blue-600 text-white'
+                  : 'text-gray-300 hover:text-white'
+              }`}
+              aria-pressed={language === 'cn'}
+            >
+              中文
+            </button>
+            <button
+              type="button"
+              onClick={() => onLanguageChange('en')}
+              className={`px-2 sm:px-3 py-1 text-xs sm:text-sm font-medium rounded transition-colors ${
+                language === 'en'
+                  ? 'bg-blue-600 text-white'
+                  : 'text-gray-300 hover:text-white'
+              }`}
+              aria-pressed={language === 'en'}
+            >
+              English
+            </button>
+          </div>
           {showNewAnalysisButton && (
             <button
               onClick={onReset}

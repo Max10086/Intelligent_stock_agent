@@ -14,10 +14,12 @@ import { ComparePage } from './components/ComparePage.tsx';
 import { HistorySidebar } from './components/HistorySidebar.tsx';
 import { useCompanyCompare } from './hooks/useCompanyCompare.ts';
 import { AnalysisStepTimeline } from './components/AnalysisStepTimeline.tsx';
-import { getUIText, FEATURE_BATCH_QUEUE } from './constants.ts';
+import { getUIText, BRAND, FEATURE_BATCH_QUEUE } from './constants.ts';
 import { useAuth } from './hooks/useAuth.ts';
 import { LoginPage } from './components/LoginPage.tsx';
 import { UsageBanner } from './components/UsageBanner.tsx';
+import { SubscriptionModal } from './components/SubscriptionModal.tsx';
+import { useSubscriptionStatus } from './hooks/useSubscriptionStatus.ts';
 import { setUsageRefreshCallback } from './utils/usageEvents.ts';
 import { useAnalytics } from './hooks/useAnalytics.ts';
 import { resolveRootReportForTicker } from './utils/analysisTimeline.ts';
@@ -58,8 +60,14 @@ const App: React.FC = () => {
   } | null>(null);
   const [viewingBaselineReport, setViewingBaselineReport] = useState<AnalysisState | null>(null);
   const [showStepTimeline, setShowStepTimeline] = useState(() => readStoredStepTimelinePreference());
+  const [isSubscriptionOpen, setIsSubscriptionOpen] = useState(false);
   const uiText = getUIText(language);
   const auth = useAuth();
+  const isPaidMember = Boolean(
+    (auth.usage?.isPaid || auth.user?.isPaid) && !auth.usage?.isAdmin && !auth.user?.isAdmin
+  );
+  const { subscription, isLoading: isSubscriptionLoading, refresh: refreshSubscription } =
+    useSubscriptionStatus(isPaidMember);
   const {
     analysisState,
     history,
@@ -342,13 +350,19 @@ const App: React.FC = () => {
   /** Main search entry (single view, idle) — input form is the only start action. */
   const isSearchHome =
     currentView === 'single' && analysisState.status === 'idle' && !showBatchStatus;
+  const isAdmin = Boolean(auth.user?.isAdmin || auth.usage?.isAdmin);
   const showNewAnalysisButton = !isSearchHome;
 
   const showStepTimelinePanel =
+    isAdmin &&
     showStepTimeline &&
     currentView === 'single' &&
     !isSearchHome &&
     (analysisState.stepLogs?.length ?? 0) > 0;
+
+  useEffect(() => {
+    document.title = BRAND.documentTitle;
+  }, []);
 
   if (auth.isLoading) {
     return (
@@ -378,7 +392,7 @@ const App: React.FC = () => {
   }
 
   return (
-    <div className="min-h-screen bg-gray-900 text-gray-100 font-sans">
+    <div className="min-h-screen bg-gray-900 text-gray-100 font-sans flex flex-col">
       <HistorySidebar
         isOpen={isHistoryOpen}
         onClose={() => setIsHistoryOpen(false)}
@@ -417,6 +431,32 @@ const App: React.FC = () => {
         onClose={() => setFollowUpModal(null)}
         onConfirm={handleConfirmFollowUp}
       />
+      <SubscriptionModal
+        isOpen={isSubscriptionOpen}
+        language={language}
+        user={
+          auth.user ||
+          (auth.session?.user
+            ? {
+                id: auth.session.user.id,
+                email: auth.session.user.email || '',
+                displayName: null,
+                avatarUrl: null,
+                isPaid: false,
+                isAdmin: false,
+                paidUntil: null,
+                createdAt: new Date().toISOString(),
+              }
+            : null)
+        }
+        onClose={() => setIsSubscriptionOpen(false)}
+        onActivated={async () => {
+          if (auth.session) {
+            await auth.refreshProfile(auth.session);
+            await refreshSubscription();
+          }
+        }}
+      />
       <Header
         onReset={handleReset}
         onToggleHistory={() => {
@@ -426,16 +466,33 @@ const App: React.FC = () => {
         onOpenCompare={() => setCurrentView('compare')}
         userEmail={auth.user?.email || null}
         onSignOut={() => void auth.signOut()}
+        showUpgradeButton={!isPaidMember}
+        isPaidMember={isPaidMember}
+        subscription={subscription}
+        isSubscriptionLoading={isSubscriptionLoading}
+        onUpgrade={() => setIsSubscriptionOpen(true)}
         language={language}
         onLanguageChange={handleLanguageChange}
         showNewAnalysisButton={showNewAnalysisButton}
         currentView={currentView}
         onViewChange={FEATURE_BATCH_QUEUE ? handleViewChange : undefined}
-        showStepTimeline={showStepTimeline}
-        onToggleStepTimeline={currentView === 'single' ? handleToggleStepTimeline : undefined}
+        showStepTimeline={isAdmin && showStepTimeline}
+        onToggleStepTimeline={
+          isAdmin && currentView === 'single' ? handleToggleStepTimeline : undefined
+        }
       />
-      <main className="container mx-auto px-4 py-8">
-        <UsageBanner language={language} usage={auth.usage} />
+      <main
+        className={
+          isSearchHome
+            ? 'flex-1 flex flex-col container mx-auto px-4 w-full'
+            : 'container mx-auto px-4 py-8'
+        }
+      >
+        <UsageBanner
+          language={language}
+          usage={auth.usage}
+          onUpgrade={() => setIsSubscriptionOpen(true)}
+        />
         {saveStatus !== 'idle' && saveMessage && (
           <div className={`max-w-4xl mx-auto mb-4 rounded-lg border px-4 py-3 flex items-center justify-between ${
             saveStatus === 'success'
@@ -453,12 +510,27 @@ const App: React.FC = () => {
             </button>
           </div>
         )}
-        <ModelSettingsPanel
-          language={language}
-          runtimeModelConfig={runtimeModelConfig}
-          onConfigApplied={applyRuntimeModelConfig}
-        />
-        {FEATURE_BATCH_QUEUE && currentView === 'batch' ? (
+        {isSearchHome ? (
+          <>
+            <div className="flex-1 flex items-center justify-center py-10 sm:py-14 -mt-8 sm:-mt-12 w-full">
+              <SearchComponent
+                onSearch={handleSearch}
+                language={language}
+                runtimeModelConfig={runtimeModelConfig}
+                onConfigApplied={applyRuntimeModelConfig}
+                isAdmin={isAdmin}
+              />
+            </div>
+          </>
+        ) : (
+          <>
+            <ModelSettingsPanel
+              language={language}
+              runtimeModelConfig={runtimeModelConfig}
+              onConfigApplied={applyRuntimeModelConfig}
+              isAdmin={isAdmin}
+            />
+            {FEATURE_BATCH_QUEUE && currentView === 'batch' ? (
           <BatchQueuePage
             language={language}
             queueStatus={queueStatus}
@@ -563,7 +635,13 @@ const App: React.FC = () => {
               </div>
             ) : null}
             {analysisState.status === 'idle' && !showBatchStatus && !isOpeningReport ? (
-              <SearchComponent onSearch={handleSearch} language={language} />
+              <SearchComponent
+                onSearch={handleSearch}
+                language={language}
+                runtimeModelConfig={runtimeModelConfig}
+                onConfigApplied={applyRuntimeModelConfig}
+                isAdmin={isAdmin}
+              />
             ) : !showBatchStatus ? (
               <>
                 {isLoadingReportDetails && (
@@ -609,6 +687,8 @@ const App: React.FC = () => {
             ) : null}
           </>
         )}
+          </>
+        )}
       </main>
       {showStepTimelinePanel && (
         <section className="border-t border-gray-700 bg-gray-900/95">
@@ -636,9 +716,18 @@ const App: React.FC = () => {
                 · {language === 'cn' ? '高级（豆包+Google）' : 'Advanced (Doubao+Google)'}
               </span>
             )}
+            {runtimeModelConfig.searchMode !== 'advanced' &&
+              runtimeModelConfig.analysis.model === 'deepseek-v4-flash' && (
+                <span className="text-amber-300 ml-1">
+                  · {language === 'cn' ? '快速（Flash 分析）' : 'Quick (Flash analysis)'}
+                </span>
+              )}
           </p>
         )}
-        <p>Intelligent Stock Agent. For informational purposes only. Not financial advice.</p>
+        <p>
+          {BRAND.name} · {language === 'cn' ? BRAND.productNameCn : BRAND.productNameEn}.{' '}
+          {language === 'cn' ? '仅供参考，不构成投资建议。' : 'For informational purposes only. Not financial advice.'}
+        </p>
       </footer>
     </div>
   );

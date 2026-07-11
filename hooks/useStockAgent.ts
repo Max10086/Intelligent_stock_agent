@@ -80,7 +80,9 @@ import {
   migrateRuntimeModelConfig,
   normalizeRuntimeModelConfig,
   pushRuntimeModelConfigToBackend,
+  resolveAuthoritativeRuntimeModelConfig,
   saveStoredRuntimeModelConfig,
+  syncAuthoritativeRuntimeModelConfig,
 } from '../utils/runtimeModelConfigStorage.ts';
 import { buildMarketCapPromptRule, formatMarketCapForPrompt } from '../utils/priceFormat.ts';
 import { resolveMarketCurrency } from '../utils/marketCurrency.ts';
@@ -100,6 +102,16 @@ const HISTORY_PAGE_SIZE = 20;
 const HISTORY_MAX_ITEMS = 100;
 const HISTORY_FIRST_PAGE_TIMEOUT_MS = 45000;
 const HISTORY_CACHE_VERSION = 2;
+
+const formatUsageLimitMessage = (error: unknown, lang: Language): string => {
+  const ui = getUIText(lang);
+  if (error && typeof error === 'object' && 'usage' in error) {
+    const usage = (error as { usage?: { requiresUpgrade?: boolean } }).usage;
+    if (usage?.requiresUpgrade) return ui.usageLimitReached;
+  }
+  if (error instanceof Error && error.message) return error.message;
+  return ui.usageLimitReached;
+};
 
 export interface UseStockAgentOptions {
   /** Skip server history fetch until auth is ready (avoids 401 + stale cache). */
@@ -336,7 +348,11 @@ export const useStockAgent = (options: UseStockAgentOptions = {}) => {
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'success' | 'error'>('idle');
   const [saveMessage, setSaveMessage] = useState('');
-  const [runtimeModelConfig, setRuntimeModelConfig] = useState<RuntimeModelConfig>(DEFAULT_RUNTIME_MODEL_CONFIG);
+  const [runtimeModelConfig, setRuntimeModelConfig] = useState<RuntimeModelConfig>(() =>
+    typeof window !== 'undefined'
+      ? resolveAuthoritativeRuntimeModelConfig(DEFAULT_RUNTIME_MODEL_CONFIG)
+      : DEFAULT_RUNTIME_MODEL_CONFIG
+  );
   const analysisStateRef = useRef<AnalysisState>(analysisState);
   const telemetryRef = useRef<LlmTelemetryEntry[]>([]);
   const historyFetchRef = useRef<Promise<AnalysisState[]> | null>(null);
@@ -674,18 +690,7 @@ export const useStockAgent = (options: UseStockAgentOptions = {}) => {
       if (!response.ok) return null;
       const data = await response.json();
       if (data?.analysis?.provider && data?.analysis?.model && data?.search?.model) {
-        const nextConfig = normalizeRuntimeModelConfig(data, DEFAULT_RUNTIME_MODEL_CONFIG);
-        const { config: migratedConfig, migrated } = migrateRuntimeModelConfig(nextConfig);
-        setRuntimeModelConfig(migratedConfig);
-        saveStoredRuntimeModelConfig(migratedConfig);
-        if (migrated) {
-          try {
-            await pushRuntimeModelConfigToBackend(migratedConfig, API_BASE_URL);
-          } catch (error) {
-            console.warn('Failed to sync migrated runtime config to backend:', error);
-          }
-        }
-        return migratedConfig;
+        return normalizeRuntimeModelConfig(data, DEFAULT_RUNTIME_MODEL_CONFIG);
       }
       return null;
     } catch {
@@ -694,27 +699,10 @@ export const useStockAgent = (options: UseStockAgentOptions = {}) => {
   }, []);
 
   const syncRuntimeModelConfigFromUserSettings = useCallback(async (): Promise<RuntimeModelConfig> => {
-    const fromServer = await reloadRuntimeModelConfig();
-    if (fromServer) {
-      setRuntimeModelConfig(fromServer);
-      saveStoredRuntimeModelConfig(fromServer);
-      return fromServer;
-    }
-
-    const stored = loadStoredRuntimeModelConfig(DEFAULT_RUNTIME_MODEL_CONFIG);
-    if (stored) {
-      setRuntimeModelConfig(stored);
-      try {
-        await pushRuntimeModelConfigToBackend(stored, API_BASE_URL);
-      } catch (error) {
-        console.warn('Failed to sync stored model settings to backend:', error);
-      }
-      return stored;
-    }
-
-    setRuntimeModelConfig(DEFAULT_RUNTIME_MODEL_CONFIG);
-    return DEFAULT_RUNTIME_MODEL_CONFIG;
-  }, [reloadRuntimeModelConfig]);
+    const synced = await syncAuthoritativeRuntimeModelConfig(API_BASE_URL, DEFAULT_RUNTIME_MODEL_CONFIG);
+    setRuntimeModelConfig(synced);
+    return synced;
+  }, []);
 
   useEffect(() => {
     syncRuntimeModelConfigFromUserSettings();
@@ -2039,7 +2027,7 @@ ${buildQuickTakeIdentityRule(company, lang)}`;
       await checkUsageQuota(1);
     } catch (error) {
       commitAnalysisState(() => createInitialState());
-      const message = error instanceof Error ? error.message : getUIText(lang).usageLimitReached;
+      const message = formatUsageLimitMessage(error, lang);
       alert(message);
       return;
     }
@@ -2212,7 +2200,7 @@ ${buildQuickTakeIdentityRule(company, lang)}`;
             : candidate
         ),
       }));
-      const message = error instanceof Error ? error.message : uiText.usageLimitReached;
+      const message = formatUsageLimitMessage(error, lang);
       alert(message);
       return;
     }
@@ -2303,7 +2291,7 @@ ${buildQuickTakeIdentityRule(company, lang)}`;
     try {
       await checkUsageQuota(targetCompanies.length);
     } catch (error) {
-      const message = error instanceof Error ? error.message : uiText.usageLimitReached;
+      const message = formatUsageLimitMessage(error, lang);
       alert(message);
       return;
     }
