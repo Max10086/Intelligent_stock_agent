@@ -1,3 +1,9 @@
+import {
+  marketCurrencyLabel,
+  resolveMarketCurrency,
+  type MarketCurrency,
+} from './marketCurrency.ts';
+
 export const parsePriceNumber = (price: string | undefined | null): number | null => {
   const parsed = Number((price || '').replace(/[^0-9.-]/g, ''));
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
@@ -5,7 +11,7 @@ export const parsePriceNumber = (price: string | undefined | null): number | nul
 
 /**
  * Tencent quote fields [44]/[45] report market cap in hundred-millions (亿).
- * e.g. CRDO total cap raw "451.1" → 45.11B USD absolute.
+ * e.g. raw "312.0" on an A-share → ¥31.2B absolute (312亿元人民币).
  */
 export const parseTencentMarketCapToAbsolute = (value?: string | null): number | null => {
   const parsed = parseFloat((value || '').replace(/,/g, ''));
@@ -13,13 +19,16 @@ export const parseTencentMarketCapToAbsolute = (value?: string | null): number |
   return parsed < 1_000_000 ? parsed * 100_000_000 : parsed;
 };
 
-/** Human-readable market cap for UI (e.g. "45.11B USD"). */
+/** Human-readable market cap for UI (e.g. "31.20B CNY"). */
 export const formatMarketCapDisplay = (
   value?: string | null,
+  exchange?: string,
   currency?: string
 ): string => {
   const normalizedAmount = parseTencentMarketCapToAbsolute(value);
   if (normalizedAmount === null) return 'N/A';
+
+  const resolvedCurrency = resolveMarketCurrency(exchange || '', currency);
 
   let display = '';
   if (normalizedAmount >= 1_000_000_000_000) {
@@ -32,27 +41,20 @@ export const formatMarketCapDisplay = (
     display = normalizedAmount.toLocaleString('en-US', { maximumFractionDigits: 0 });
   }
 
-  if (currency && /^[A-Z]{3}$/.test(currency)) {
-    return `${display} ${currency}`;
-  }
-  return display;
+  return `${display} ${resolvedCurrency}`;
 };
 
 /** Market cap phrasing for LLM prompts — matches the UI conversion logic. */
 export const formatMarketCapForPrompt = (
   value: string | undefined | null,
   lang: 'en' | 'cn',
+  exchange: string,
   currency?: string
 ): string => {
   const normalizedAmount = parseTencentMarketCapToAbsolute(value);
   if (normalizedAmount === null) return lang === 'cn' ? '未知' : 'N/A';
 
-  const resolvedCurrency =
-    currency && /^[A-Z]{3}$/.test(currency)
-      ? currency
-      : currency === 'CNY' || currency === 'HKD'
-        ? currency
-        : 'USD';
+  const resolvedCurrency = resolveMarketCurrency(exchange, currency);
 
   if (lang === 'cn') {
     const yi = normalizedAmount / 100_000_000;
@@ -65,7 +67,20 @@ export const formatMarketCapForPrompt = (
     return `${yi.toFixed(1)}亿美元`;
   }
 
-  return formatMarketCapDisplay(value, resolvedCurrency);
+  return formatMarketCapDisplay(value, exchange, resolvedCurrency);
+};
+
+export const buildMarketCapPromptRule = (
+  marketCapLabel: string,
+  exchange: string,
+  currency: MarketCurrency,
+  lang: 'en' | 'cn'
+): string => {
+  const currencyName = marketCurrencyLabel(currency, lang);
+  if (lang === 'cn') {
+    return `7) 若提及市值规模，必须原样使用「${marketCapLabel}」（${exchange}，计价货币：${currencyName}），禁止自行换算、缩放、改写数字，禁止将人民币市值写成美元或港元。`;
+  }
+  return `7) If mentioning market cap, use exactly "${marketCapLabel}" (${exchange}, currency: ${currency}) — do NOT recalculate, rescale, or swap CNY/HKD/USD units.`;
 };
 
 export const computeReturnPct = (anchorPrice: string, currentPrice: string): number | null => {
@@ -86,7 +101,6 @@ export const formatDisplayPrice = (
 ): string => {
   const parsed = parsePriceNumber(price);
   if (parsed === null) return 'N/A';
-  const currency =
-    exchange === 'HKEX' ? 'HKD' : exchange === 'SSE' || exchange === 'SZSE' ? 'CNY' : 'USD';
+  const currency = resolveMarketCurrency(exchange || '');
   return new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(parsed);
 };

@@ -32,6 +32,9 @@ export const ReturnTrackingPanel: React.FC<ReturnTrackingPanelProps> = ({
   const returnLabel = formatReturnPct(returnPct);
   const returnPositive = returnPct !== null && returnPct !== undefined && returnPct >= 0;
   const returnNegative = returnPct !== null && returnPct !== undefined && returnPct < 0;
+  const displayPrice = currentPrice || anchorPrice;
+  const hasReturn = returnPct !== null && returnPct !== undefined;
+  const updatingLabel = language === 'cn' ? '更新中…' : 'updating…';
 
   return (
     <section className="rounded-lg border border-emerald-800/40 bg-emerald-950/10 p-4 text-sm space-y-3">
@@ -53,7 +56,10 @@ export const ReturnTrackingPanel: React.FC<ReturnTrackingPanelProps> = ({
         <div>
           <p className="text-gray-500">{ui.returnTrackingCurrentPrice}</p>
           <p className="text-gray-200">
-            {isLoading ? '...' : formatDisplayPrice(currentPrice || anchorPrice, exchange)}
+            {formatDisplayPrice(displayPrice, exchange)}
+            {isLoading && !currentPrice && (
+              <span className="ml-1 text-gray-500">{updatingLabel}</span>
+            )}
           </p>
         </div>
         <div>
@@ -67,7 +73,11 @@ export const ReturnTrackingPanel: React.FC<ReturnTrackingPanelProps> = ({
                   : 'text-gray-300'
             }
           >
-            {isLoading ? '...' : returnLabel}
+            {hasReturn
+              ? returnLabel
+              : isLoading
+                ? updatingLabel
+                : '—'}
           </p>
         </div>
       </div>

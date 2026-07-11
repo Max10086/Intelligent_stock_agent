@@ -1,5 +1,10 @@
 import type { CompanyProfile, Language } from '../types.ts';
-import { formatDisplayPrice, formatMarketCapForPrompt } from './priceFormat.ts';
+import {
+  buildMarketCapPromptRule,
+  formatDisplayPrice,
+  formatMarketCapForPrompt,
+} from './priceFormat.ts';
+import { marketCurrencyLabel, resolveMarketCurrency } from './marketCurrency.ts';
 import {
   buildCompanyIdentityBlock,
   buildSearchDisambiguationBlock,
@@ -18,17 +23,23 @@ export const buildVerifiedMarketContext = (
   const price = formatDisplayPrice(profile.currentPrice, profile.exchange);
   const quoteTime = profile.quoteTime?.trim() || '';
   const pe = profile.peTtm?.trim() || 'N/A';
-  const marketCap = formatMarketCapForPrompt(profile.marketCap, lang, profile.currency);
-  const currency = profile.currency?.trim() || '';
+  const resolvedCurrency = resolveMarketCurrency(profile.exchange, profile.currency);
+  const marketCap = formatMarketCapForPrompt(
+    profile.marketCap,
+    lang,
+    profile.exchange,
+    resolvedCurrency
+  );
+  const currencyLabel = marketCurrencyLabel(resolvedCurrency, lang);
 
   if (lang === 'cn') {
     return `${identityBlock}
 
 【系统已验证行情快照 — 「当前股价/估值」必须以此为准】
 - 公司：${profile.name}（${profile.ticker} / ${profile.exchange}）
-- 当前股价：${price}${currency ? ` ${currency}` : ''}${quoteTime ? `（行情时间 ${quoteTime}）` : ''}
+- 当前股价：${price}（${profile.exchange}，计价货币：${currencyLabel}）${quoteTime ? `（行情时间 ${quoteTime}）` : ''}
 - 市盈率 TTM：${pe}
-- 总市值：${marketCap}（引用市值时必须使用此数值，禁止自行换算或改写）
+- 总市值：${marketCap}（引用市值时必须使用此数值及货币单位，禁止自行换算或改写，禁止将人民币市值写成美元/港元）
 
 行情硬性规则（违反即为严重错误）：
 1. 凡写「当前股价」「现价」「当前价位」「当前估值」「P/E」「市销率」等，必须使用上述已验证价格与倍数；不得从搜索摘取其他数字当作现价。
@@ -40,9 +51,9 @@ export const buildVerifiedMarketContext = (
 
 [VERIFIED MARKET SNAPSHOT — use as the ONLY source for "current price" / valuation]
 - Company: ${profile.name} (${profile.ticker} / ${profile.exchange})
-- Current price: ${price}${currency ? ` ${currency}` : ''}${quoteTime ? ` (as of ${quoteTime})` : ''}
+- Current price: ${price} (${profile.exchange}, currency: ${resolvedCurrency})${quoteTime ? ` (as of ${quoteTime})` : ''}
 - PE (TTM): ${pe}
-- Market cap: ${marketCap} (use this figure verbatim when citing market cap — do NOT recalculate)
+- Market cap: ${marketCap} (use this figure and currency verbatim when citing market cap — do NOT recalculate or swap CNY/HKD/USD)
 
 PRICE RULES (violations are critical errors):
 1. Any mention of "current price", "trading at", "current valuation", P/E, P/S, etc. MUST use the verified figures above — not numbers from web search alone.

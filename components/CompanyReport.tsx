@@ -8,6 +8,7 @@ import { formatFollowUpDate, formatPriceChangePct } from '../utils/followUpHelpe
 import { useReturnTracking } from '../hooks/useReturnTracking.ts';
 import { ReturnTrackingPanel } from './ReturnTrackingPanel.tsx';
 import { formatDisplayPrice, formatMarketCapDisplay } from '../utils/priceFormat.ts';
+import { sanitizeQuickTakeMarketCap } from '../utils/marketCapTextSanitize.ts';
 import type { ComparisonBaselineMode } from '../utils/analysisTimeline.ts';
 import { normalizeDisplayText, mergeBrokenEvidenceFragments } from '../utils/textNormalize.ts';
 import { THESIS_SECTION_KEYS } from '../utils/synthesizeConclusionPrompt.ts';
@@ -246,7 +247,7 @@ export const CompanyReport: React.FC<CompanyReportProps> = ({
   const uiText = getUIText(language);
   const { profile, quickTake, status, qna, conclusion, finalConclusion, error: companyError } = companyAnalysis;
   const [isLaunching, setIsLaunching] = useState(false);
-  const { recordOpen, getCompanyResult, isLoading: isTrackingLoading } = useReturnTracking();
+  const { openAndTrack, getCompanyResult, isRefreshing } = useReturnTracking();
   const tracking = getCompanyResult(companyAnalysis.id);
   const freshnessAudit = buildFreshnessAudit(qna);
   const yesLabel = language === 'cn' ? '是' : 'Yes';
@@ -323,7 +324,11 @@ export const CompanyReport: React.FC<CompanyReportProps> = ({
   };
 
   const displayCaps = getDisplayMarketCaps();
-  const displayQuickTake = (quickTake || '').trim();
+  const displayQuickTake = sanitizeQuickTakeMarketCap(
+    (quickTake || '').trim(),
+    profile,
+    language
+  );
   const priceChange = comparisonBaseline
     ? formatPriceChangePct(comparisonBaseline.price, profile.currentPrice)
     : null;
@@ -331,7 +336,7 @@ export const CompanyReport: React.FC<CompanyReportProps> = ({
 
   useEffect(() => {
     if (!reportId || !analysisTimestamp || !profile.currentPrice) return;
-    void recordOpen({
+    void openAndTrack({
       sourceType: 'analysis_report',
       sourceId: reportId,
       companies: [
@@ -355,7 +360,7 @@ export const CompanyReport: React.FC<CompanyReportProps> = ({
     profile.exchange,
     profile.name,
     profile.currentPrice,
-    recordOpen,
+    openAndTrack,
   ]);
 
   return (
@@ -472,7 +477,7 @@ export const CompanyReport: React.FC<CompanyReportProps> = ({
           currentPrice={livePrice}
           returnPct={tracking?.returnPct}
           timeline={tracking?.timeline}
-          isLoading={isTrackingLoading && !tracking}
+          isLoading={isRefreshing && !tracking}
         />
       )}
 
@@ -492,9 +497,12 @@ export const CompanyReport: React.FC<CompanyReportProps> = ({
               <div className="rounded-md bg-gray-900/40 p-3 min-h-[84px] flex flex-col justify-between">
                   <p className="text-gray-400 flex items-center gap-1"><CurrencyDollarIcon className="w-4 h-4"/> {uiText.currentPrice}</p>
                   <p className="text-lg font-semibold text-white">
-                    {isTrackingLoading && !tracking
-                      ? '...'
-                      : formatDisplayPrice(livePrice, profile.exchange)}
+                    {formatDisplayPrice(livePrice, profile.exchange)}
+                    {isRefreshing && !tracking?.currentPrice && (
+                      <span className="ml-1 text-[10px] text-gray-500 font-normal">
+                        {language === 'cn' ? '更新中…' : 'updating…'}
+                      </span>
+                    )}
                   </p>
               </div>
               <div className="rounded-md bg-gray-900/40 p-3 min-h-[84px] flex flex-col justify-between">
@@ -513,11 +521,11 @@ export const CompanyReport: React.FC<CompanyReportProps> = ({
               </div>
               <div className="rounded-md bg-gray-900/40 p-3 min-h-[84px] flex flex-col justify-between">
                   <p className="text-gray-400">{uiText.marketCap}</p>
-                  <p className="text-lg font-semibold text-white">{formatMarketCapDisplay(displayCaps.total, profile.currency)}</p>
+                  <p className="text-lg font-semibold text-white">{formatMarketCapDisplay(displayCaps.total, profile.exchange, profile.currency)}</p>
               </div>
               <div className="rounded-md bg-gray-900/40 p-3 min-h-[84px] flex flex-col justify-between">
                   <p className="text-gray-400">{uiText.floatMarketCap}</p>
-                  <p className="text-lg font-semibold text-white">{formatMarketCapDisplay(displayCaps.float, profile.currency)}</p>
+                  <p className="text-lg font-semibold text-white">{formatMarketCapDisplay(displayCaps.float, profile.exchange, profile.currency)}</p>
               </div>
           </div>
         </div>

@@ -82,7 +82,9 @@ import {
   pushRuntimeModelConfigToBackend,
   saveStoredRuntimeModelConfig,
 } from '../utils/runtimeModelConfigStorage.ts';
-import { formatMarketCapForPrompt } from '../utils/priceFormat.ts';
+import { buildMarketCapPromptRule, formatMarketCapForPrompt } from '../utils/priceFormat.ts';
+import { resolveMarketCurrency } from '../utils/marketCurrency.ts';
+import { sanitizeQuickTakeMarketCap } from '../utils/marketCapTextSanitize.ts';
 import { apiFetch } from '../utils/authenticatedFetch.ts';
 import { checkUsageQuota, recordCompanyUsage } from '../utils/usageClient.ts';
 import { notifyUsageUpdated } from '../utils/usageEvents.ts';
@@ -1606,16 +1608,25 @@ CRITICAL RETRY: Include valid "vs_prior" with rating_change (upgrade/maintain/do
     lang: Language
   ): Promise<string> => {
     const outputLanguage = lang === 'cn' ? 'Simplified Chinese' : 'English';
-    const marketCapLabel = formatMarketCapForPrompt(company.marketCap, lang, company.currency);
+    const resolvedCurrency = resolveMarketCurrency(company.exchange, company.currency);
+    const marketCapLabel = formatMarketCapForPrompt(
+      company.marketCap,
+      lang,
+      company.exchange,
+      resolvedCurrency
+    );
     const floatMarketCapLabel = formatMarketCapForPrompt(
       company.floatMarketCap,
       lang,
-      company.currency
+      company.exchange,
+      resolvedCurrency
     );
-    const marketCapRule =
-      lang === 'cn'
-        ? `7) 若提及市值规模，必须原样使用「${marketCapLabel}」，禁止自行换算、缩放或改写数字。`
-        : `7) If mentioning market cap, use exactly "${marketCapLabel}" — do NOT recalculate or rescale.`;
+    const marketCapRule = buildMarketCapPromptRule(
+      marketCapLabel,
+      company.exchange,
+      resolvedCurrency,
+      lang
+    );
     const prompt = `You are writing a sharp "at-a-glance" company brief in ${outputLanguage}.
 
 Target company:
@@ -1629,7 +1640,7 @@ Reference writing style (must emulate this level of concreteness and directness)
 
 Hard requirements:
 1) Output EXACTLY 2 sentences.
-2) Sentence 1: state company identity + relative position/role in its market + scale signal.
+2) Sentence 1: state company identity + relative position/role in its market + scale signal. If mentioning market cap, copy the verified market cap text exactly: 「${marketCapLabel}」.
 3) Sentence 2: explain the monetization model concretely (how it makes money, key products/services, value-chain position).
 4) Use concrete industry wording; no generic filler.
 5) Forbidden vague phrases (or their equivalents): "core product and service model", "certain differentiation", "comprehensive conclusion", "etc.".
@@ -1646,7 +1657,8 @@ ${buildQuickTakeIdentityRule(company, lang)}`;
     });
     appendTelemetry('quick_take', startedAt, response);
 
-    return (response.text || '').replace(/\s+/g, ' ').trim();
+    const raw = (response.text || '').replace(/\s+/g, ' ').trim();
+    return sanitizeQuickTakeMarketCap(raw, company, lang);
   };
 
   const runAnalysisForCompany = async (

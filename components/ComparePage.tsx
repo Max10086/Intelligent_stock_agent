@@ -57,7 +57,7 @@ const CompareResultsPanel: React.FC<{
 }> = ({ run, language, onFollowUp, isRunning, onOpenHistorySidebar }) => {
   const ui = getUIText(language);
   const labels = dimensionLabels(language);
-  const { recordOpen, getCompanyResult, isLoading: isTrackingLoading } = useReturnTracking();
+  const { openAndTrack, getCompanyResult, isRefreshing } = useReturnTracking();
   const itemById = useMemo(
     () => new Map(run.items.map(item => [`${item.reportId}::${item.companyId}`, item])),
     [run.items]
@@ -87,14 +87,14 @@ const CompareResultsPanel: React.FC<{
 
     if (!companies.length) return;
 
-    void recordOpen({
+    void openAndTrack({
       sourceType: 'compare_run',
       sourceId: run.runId,
       companies,
     }).catch(error => {
       console.warn('Failed to record compare return tracking:', error);
     });
-  }, [run.runId, run.createdAt, run.rankings, digestsById, itemById, recordOpen]);
+  }, [run.runId, run.createdAt, run.rankings, digestsById, itemById, openAndTrack]);
 
   return (
     <div className="space-y-6">
@@ -188,6 +188,9 @@ const CompareResultsPanel: React.FC<{
           const digest = digestsById.get(entry.itemId);
           const tracking = getCompanyResult(entry.itemId);
           const exchange = item?.exchange || digest?.exchange;
+          const fallbackPrice = digest?.profileSnapshot?.price;
+          const displayPrice = tracking?.currentPrice || fallbackPrice;
+          const displayReturnPct = tracking?.returnPct;
           return (
             <div
               key={entry.itemId}
@@ -206,37 +209,37 @@ const CompareResultsPanel: React.FC<{
                 </span>
               </div>
 
-              {(tracking || digest?.profileSnapshot?.price) && (
+              {(tracking || fallbackPrice) && (
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
                   <div className="rounded-md bg-gray-900/50 px-3 py-2">
                     <p className="text-gray-500">{ui.returnTrackingCurrentPrice}</p>
                     <p className="text-base font-semibold text-white mt-1">
-                      {isTrackingLoading && !tracking
-                        ? '...'
-                        : formatDisplayPrice(
-                            tracking?.currentPrice || digest?.profileSnapshot?.price,
-                            exchange
-                          )}
+                      {formatDisplayPrice(displayPrice, exchange)}
+                      {isRefreshing && !tracking?.currentPrice && (
+                        <span className="ml-1 text-[10px] text-gray-500 font-normal">
+                          {language === 'cn' ? '更新中…' : 'updating…'}
+                        </span>
+                      )}
                     </p>
                   </div>
                   <div className="rounded-md bg-gray-900/50 px-3 py-2">
                     <p className="text-gray-500">{ui.returnTrackingReturn}</p>
                     <p
                       className={`text-base font-semibold mt-1 ${
-                        tracking?.returnPct !== null &&
-                        tracking?.returnPct !== undefined &&
-                        tracking.returnPct >= 0
+                        displayReturnPct !== null &&
+                        displayReturnPct !== undefined &&
+                        displayReturnPct >= 0
                           ? 'text-green-400'
-                          : tracking?.returnPct !== null &&
-                              tracking?.returnPct !== undefined
+                          : displayReturnPct !== null &&
+                              displayReturnPct !== undefined
                             ? 'text-red-400'
                             : 'text-gray-300'
                       }`}
                     >
-                      {isTrackingLoading && !tracking
-                        ? '...'
-                        : tracking?.returnPct !== null && tracking?.returnPct !== undefined
-                          ? `${tracking.returnPct >= 0 ? '+' : ''}${tracking.returnPct.toFixed(1)}%`
+                      {displayReturnPct !== null && displayReturnPct !== undefined
+                        ? `${displayReturnPct >= 0 ? '+' : ''}${displayReturnPct.toFixed(1)}%`
+                        : isRefreshing
+                          ? (language === 'cn' ? '更新中…' : 'updating…')
                           : '—'}
                     </p>
                   </div>
@@ -266,17 +269,17 @@ const CompareResultsPanel: React.FC<{
 
               {entry.rationale && <p className="text-sm text-gray-300">{entry.rationale}</p>}
 
-              {(tracking || digest?.profileSnapshot?.price) && (
+              {(tracking || fallbackPrice) && (
                 <ReturnTrackingPanel
                   language={language}
                   ticker={item?.ticker || digest?.ticker || entry.itemId}
                   exchange={exchange}
-                  anchorPrice={tracking?.anchorPrice || digest?.profileSnapshot?.price || ''}
+                  anchorPrice={tracking?.anchorPrice || fallbackPrice || ''}
                   anchorDate={tracking?.anchorDate || run.createdAt}
-                  currentPrice={tracking?.currentPrice}
-                  returnPct={tracking?.returnPct}
+                  currentPrice={displayPrice}
+                  returnPct={displayReturnPct}
                   timeline={tracking?.timeline}
-                  isLoading={isTrackingLoading && !tracking}
+                  isLoading={isRefreshing && !tracking}
                 />
               )}
             </div>

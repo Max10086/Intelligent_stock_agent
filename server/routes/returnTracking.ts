@@ -36,6 +36,32 @@ async function assertSourceOwned(
   if (!session) throw new Error('Comparison run not found');
 }
 
+router.get('/:sourceType/:sourceId', async (req, res) => {
+  try {
+    const userId = req.user!.id;
+    const sourceType = req.params.sourceType;
+    const sourceId = req.params.sourceId?.trim();
+
+    if (!isSourceType(sourceType)) {
+      return res.status(400).json({ error: 'sourceType must be compare_run or analysis_report' });
+    }
+    if (!sourceId) {
+      return res.status(400).json({ error: 'sourceId is required' });
+    }
+
+    await assertSourceOwned(userId, sourceType, sourceId);
+
+    const result = await returnTrackingService.getCached(userId, sourceType, sourceId);
+    res.json(result);
+  } catch (error: any) {
+    console.error('[returnTracking] get cached failed:', error);
+    const status = /not found/i.test(error?.message) ? 404 : 500;
+    res.status(status).json({
+      error: error?.message || 'Failed to load return tracking',
+    });
+  }
+});
+
 router.post('/record', async (req, res) => {
   try {
     const userId = req.user!.id;

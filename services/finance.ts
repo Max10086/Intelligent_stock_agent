@@ -6,6 +6,7 @@ import {
   type ParsedSearchQuery,
 } from '../utils/searchQueryIntent.ts';
 import { scoreYahooFinanceQuote } from '../utils/companyIdentity.ts';
+import { normalizeCurrencyCode, resolveMarketCurrency } from '../utils/marketCurrency.ts';
 
 const decodeTencentQuoteText = async (res: Response): Promise<string> => {
     const buffer = await res.arrayBuffer();
@@ -349,9 +350,8 @@ const formatSignedValue = (raw: string): string => {
 };
 
 const parseCurrencyField = (raw: string): string | undefined => {
-    if (!raw) return undefined;
-    const trimmed = raw.trim();
-    return /^[A-Z]{3}$/.test(trimmed) ? trimmed : undefined;
+    const normalized = normalizeCurrencyCode(raw);
+    return normalized || undefined;
 };
 
 const get52WeekBounds = (parts: string[], exchange: string) => {
@@ -533,6 +533,32 @@ export const searchTicker = async (query: string): Promise<Pick<CompanyProfile, 
     return await searchTickerByCompanyName(intent);
 };
 
+/** Lightweight quote fetch — current price only, no kline/Nasdaq history. */
+export const getQuotePrice = async (
+    basicProfile: Pick<CompanyProfile, 'ticker' | 'exchange'>
+): Promise<string | null> => {
+    const formattedTicker = formatTickerForTencent(basicProfile.ticker, basicProfile.exchange);
+    try {
+        const quoteRes = await fetchWithRetry(`https://qt.gtimg.cn/q=${formattedTicker}`);
+        if (!quoteRes.ok) return null;
+
+        const quoteText = await decodeTencentQuoteText(quoteRes);
+        const quoteData = quoteText.substring(quoteText.indexOf('"') + 1, quoteText.lastIndexOf('"'));
+        const parts = quoteData.split('~');
+        if (parts.length < 4) return null;
+
+        const priceStr = (parts[3] || '').trim();
+        const parsed = parseFloat(priceStr);
+        return Number.isFinite(parsed) && parsed > 0 ? priceStr : null;
+    } catch (error) {
+        console.warn(
+            `[getQuotePrice] Failed for ${basicProfile.ticker}:`,
+            error instanceof Error ? error.message : error
+        );
+        return null;
+    }
+};
+
 export const getFinancialData = async (
     basicProfile: Pick<CompanyProfile, 'name' | 'ticker' | 'exchange'>
 ): Promise<CompanyProfile> => {
@@ -575,7 +601,7 @@ export const getFinancialData = async (
         const marketCap = parts[45] || '';
         const floatMarketCap = parts[44] || '';
         const { high52w, low52w } = get52WeekBounds(parts, basicProfile.exchange);
-        const currency = parseCurrencyField(parts[35] || '');
+        const quoteCurrency = parseCurrencyField(parts[35] || '');
 
         let currentPrice = parseFloat(parts[3] || '0');
         let currentPriceStr = parts[3] || '0.00';
@@ -621,6 +647,8 @@ export const getFinancialData = async (
         } catch (periodError) {
             console.warn(`Period-change data unavailable for ${basicProfile.ticker}:`, periodError);
         }
+
+        const currency = resolveMarketCurrency(basicProfile.exchange, quoteCurrency);
 
         return {
             ...basicProfile,

@@ -9,7 +9,13 @@ import {
   truncateConclusion,
 } from '../utils/analysisTimeline.ts';
 import { formatCompareSessionLabel } from '../utils/compareSessionLabel.ts';
-import { TrashIcon } from './icons.tsx';
+import {
+  compareSessionMatchesSearch,
+  filterTickerHistoryGroups,
+  normalizeHistorySearchQuery,
+  reportMatchesSearch,
+} from '../utils/historySearch.ts';
+import { SearchIcon, TrashIcon } from './icons.tsx';
 
 interface HistorySidebarProps {
   isOpen: boolean;
@@ -72,6 +78,8 @@ export const HistorySidebar: React.FC<HistorySidebarProps> = ({
   const [sidebarTab, setSidebarTab] = useState<'reports' | 'comparisons'>('reports');
   const [viewMode, setViewMode] = useState<'grouped' | 'flat'>('flat');
   const [expandedTickers, setExpandedTickers] = useState<Record<string, boolean>>({});
+  const [reportSearchQuery, setReportSearchQuery] = useState('');
+  const [compareSearchQuery, setCompareSearchQuery] = useState('');
 
   useEffect(() => {
     if (isOpen && openToComparisons) {
@@ -85,26 +93,71 @@ export const HistorySidebar: React.FC<HistorySidebarProps> = ({
     [history, currentLanguage]
   );
 
+  const isReportSearchActive = normalizeHistorySearchQuery(reportSearchQuery).length > 0;
+  const isCompareSearchActive = normalizeHistorySearchQuery(compareSearchQuery).length > 0;
+
+  const filteredHistory = useMemo(
+    () =>
+      isReportSearchActive
+        ? history.filter(item => reportMatchesSearch(item, reportSearchQuery))
+        : history,
+    [history, reportSearchQuery, isReportSearchActive]
+  );
+
+  const filteredTickerGroups = useMemo(
+    () =>
+      isReportSearchActive
+        ? filterTickerHistoryGroups(tickerGroups, reportSearchQuery)
+        : tickerGroups,
+    [tickerGroups, reportSearchQuery, isReportSearchActive]
+  );
+
+  const filteredCompareSessions = useMemo(
+    () =>
+      isCompareSearchActive
+        ? compareSessions.filter(session => compareSessionMatchesSearch(session, compareSearchQuery))
+        : compareSessions,
+    [compareSessions, compareSearchQuery, isCompareSearchActive]
+  );
+
   const reportCountLabel = useMemo(() => {
     const loaded = historyLoadedCount || history.length;
     const total = historyTotalCount ?? loaded;
-    return uiText.historyReportCount
+    const base = uiText.historyReportCount
       .replace('{loaded}', String(loaded))
       .replace('{total}', String(total));
-  }, [history.length, historyLoadedCount, historyTotalCount, uiText.historyReportCount]);
+    if (!isReportSearchActive) return base;
+    const matchCount =
+      viewMode === 'grouped'
+        ? filteredTickerGroups.reduce((sum, group) => sum + group.entries.length, 0)
+        : filteredHistory.length;
+    return currentLanguage === 'cn'
+      ? `匹配 ${matchCount} 条 · ${base}`
+      : `${matchCount} matching · ${base}`;
+  }, [
+    history.length,
+    historyLoadedCount,
+    historyTotalCount,
+    uiText.historyReportCount,
+    isReportSearchActive,
+    viewMode,
+    filteredTickerGroups,
+    filteredHistory.length,
+    currentLanguage,
+  ]);
 
   useEffect(() => {
-    if (viewMode !== 'grouped' || tickerGroups.length === 0) return;
+    if (viewMode !== 'grouped' || filteredTickerGroups.length === 0) return;
     setExpandedTickers(prev => {
       const next = { ...prev };
-      for (const group of tickerGroups) {
-        if (next[group.ticker] === undefined) {
+      for (const group of filteredTickerGroups) {
+        if (isReportSearchActive || next[group.ticker] === undefined) {
           next[group.ticker] = true;
         }
       }
       return next;
     });
-  }, [viewMode, tickerGroups]);
+  }, [viewMode, filteredTickerGroups, isReportSearchActive]);
 
   const isExpanded = (ticker: string) => expandedTickers[ticker] ?? false;
 
@@ -271,6 +324,33 @@ export const HistorySidebar: React.FC<HistorySidebarProps> = ({
     );
   };
 
+  const renderSearchInput = (
+    value: string,
+    onChange: (value: string) => void,
+    placeholder: string
+  ) => (
+    <div className="relative">
+      <SearchIcon className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-500 pointer-events-none" />
+      <input
+        type="search"
+        value={value}
+        onChange={event => onChange(event.target.value)}
+        placeholder={placeholder}
+        className="w-full pl-8 pr-8 py-1.5 text-xs bg-gray-900/80 border border-gray-700/80 rounded-md text-gray-200 placeholder:text-gray-500 focus:outline-none focus:border-blue-500/60"
+      />
+      {value && (
+        <button
+          type="button"
+          onClick={() => onChange('')}
+          className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300 text-sm leading-none"
+          aria-label={currentLanguage === 'cn' ? '清除搜索' : 'Clear search'}
+        >
+          &times;
+        </button>
+      )}
+    </div>
+  );
+
   const renderReportsContent = () => {
     if (isLoading && history.length === 0) {
       return (
@@ -310,6 +390,17 @@ export const HistorySidebar: React.FC<HistorySidebarProps> = ({
       );
     }
 
+    const hasReportSearchResults =
+      viewMode === 'grouped' ? filteredTickerGroups.length > 0 : filteredHistory.length > 0;
+
+    if (isReportSearchActive && !hasReportSearchResults) {
+      return (
+        <div className="flex-grow flex items-center justify-center text-center p-4">
+          <p className="text-gray-500 text-sm">{uiText.historySearchNoResults}</p>
+        </div>
+      );
+    }
+
     return (
       <>
         {(isLoading || isLoadingMore) && history.length > 0 && (
@@ -320,7 +411,7 @@ export const HistorySidebar: React.FC<HistorySidebarProps> = ({
         )}
         <div className="flex-grow overflow-y-auto">
           {viewMode === 'grouped' ? (
-            tickerGroups.map(group => (
+            filteredTickerGroups.map(group => (
               <div key={group.ticker} className="border-b border-gray-700/60">
                 <button
                   type="button"
@@ -346,7 +437,7 @@ export const HistorySidebar: React.FC<HistorySidebarProps> = ({
               </div>
             ))
           ) : (
-            history.map(item => renderFlatItem(item))
+            filteredHistory.map(item => renderFlatItem(item))
           )}
           {(isLoadingMore || historyHasMore) && history.length > 0 && (
             <div className="px-4 py-3 text-center border-t border-gray-700/50">
@@ -412,13 +503,25 @@ export const HistorySidebar: React.FC<HistorySidebarProps> = ({
       );
     }
 
+    if (isCompareSearchActive && filteredCompareSessions.length === 0) {
+      return (
+        <div className="flex-grow flex items-center justify-center text-center p-4">
+          <p className="text-gray-500 text-sm">{uiText.compareSearchNoResults}</p>
+        </div>
+      );
+    }
+
     return (
       <>
         <p className="px-4 py-2 text-xs text-gray-500 border-b border-gray-700/60">
-          {uiText.compareSidebarHint}
+          {isCompareSearchActive
+            ? currentLanguage === 'cn'
+              ? `匹配 ${filteredCompareSessions.length} 条对比`
+              : `${filteredCompareSessions.length} matching comparison${filteredCompareSessions.length === 1 ? '' : 's'}`
+            : uiText.compareSidebarHint}
         </p>
         <div className="flex-grow overflow-y-auto">
-          {compareSessions.map(session => renderCompareSession(session))}
+          {filteredCompareSessions.map(session => renderCompareSession(session))}
         </div>
         <div className="p-4 border-t border-gray-700 space-y-2">
           <button
@@ -488,6 +591,11 @@ export const HistorySidebar: React.FC<HistorySidebarProps> = ({
             </div>
             {sidebarTab === 'reports' && (
               <div className="mt-2 space-y-2">
+                {renderSearchInput(
+                  reportSearchQuery,
+                  setReportSearchQuery,
+                  uiText.historySearchPlaceholder
+                )}
                 <p className="text-xs text-gray-400">{reportCountLabel}</p>
                 <div className="inline-flex rounded-md bg-gray-900/80 p-0.5 border border-gray-700/80 text-xs">
                 <button
@@ -518,6 +626,15 @@ export const HistorySidebar: React.FC<HistorySidebarProps> = ({
                   >
                     {uiText.historyRetry}
                   </button>
+                )}
+              </div>
+            )}
+            {sidebarTab === 'comparisons' && (
+              <div className="mt-2">
+                {renderSearchInput(
+                  compareSearchQuery,
+                  setCompareSearchQuery,
+                  uiText.compareSearchPlaceholder
                 )}
               </div>
             )}

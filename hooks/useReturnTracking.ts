@@ -3,17 +3,47 @@ import type {
   RecordReturnTrackingRequest,
   RecordReturnTrackingResponse,
   ReturnTrackingCompanyResult,
+  ReturnTrackingSourceType,
 } from '../types/returnTracking.ts';
 import { localObservedDate } from '../utils/localDate.ts';
 import { apiFetch } from '../utils/authenticatedFetch.ts';
 
 export const useReturnTracking = () => {
   const [data, setData] = useState<RecordReturnTrackingResponse | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
+  const [isLoadingCached, setIsLoadingCached] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const loadCached = useCallback(
+    async (sourceType: ReturnTrackingSourceType, sourceId: string) => {
+      setIsLoadingCached(true);
+      setError(null);
+      try {
+        const response = await apiFetch(
+          `/api/return-tracking/${sourceType}/${encodeURIComponent(sourceId)}`
+        );
+        const payload = await response.json();
+        if (!response.ok) {
+          throw new Error(payload.error || 'Failed to load return tracking');
+        }
+        const result = payload as RecordReturnTrackingResponse;
+        if (result.companies.length > 0) {
+          setData(result);
+        }
+        return result;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Failed to load return tracking';
+        setError(message);
+        throw err;
+      } finally {
+        setIsLoadingCached(false);
+      }
+    },
+    []
+  );
+
   const recordOpen = useCallback(async (request: Omit<RecordReturnTrackingRequest, 'observedDate'>) => {
-    setIsLoading(true);
+    setIsRefreshing(true);
     setError(null);
     try {
       const response = await apiFetch('/api/return-tracking/record', {
@@ -35,9 +65,21 @@ export const useReturnTracking = () => {
       setError(message);
       throw err;
     } finally {
-      setIsLoading(false);
+      setIsRefreshing(false);
     }
   }, []);
+
+  const openAndTrack = useCallback(
+    async (request: Omit<RecordReturnTrackingRequest, 'observedDate'>) => {
+      try {
+        await loadCached(request.sourceType, request.sourceId);
+      } catch {
+        // Cache miss or first open — fall through to live refresh.
+      }
+      return recordOpen(request);
+    },
+    [loadCached, recordOpen]
+  );
 
   const getCompanyResult = useCallback(
     (companyKey: string): ReturnTrackingCompanyResult | undefined =>
@@ -47,9 +89,13 @@ export const useReturnTracking = () => {
 
   return {
     data,
-    isLoading,
+    isLoading: isLoadingCached || isRefreshing,
+    isLoadingCached,
+    isRefreshing,
     error,
+    loadCached,
     recordOpen,
+    openAndTrack,
     getCompanyResult,
   };
 };
