@@ -2,6 +2,7 @@ import express from 'express';
 import { requireAuth } from '../middleware/auth.js';
 import { trackUserEvent } from '../services/analytics.js';
 import { getUsageSummary } from '../services/usageLimit.js';
+import { getUserSubscriptionSummaryFast } from '../services/subscriptionService.js';
 import { getUserProfile } from '../services/userService.js';
 import { isValidEmail, normalizeEmail, validatePassword } from '../../utils/authValidation.js';
 import {
@@ -141,14 +142,19 @@ router.get('/me', requireAuth, async (req, res) => {
 
 router.post('/sync', requireAuth, async (req, res) => {
   try {
-    const user = await getUserProfile(req.user!.id);
-    const usage = await getUsageSummary(req.user!.id);
-    await trackUserEvent({
+    const [user, usage, subscription] = await Promise.all([
+      getUserProfile(req.user!.id),
+      getUsageSummary(req.user!.id),
+      getUserSubscriptionSummaryFast(req.user!.id),
+    ]);
+
+    void trackUserEvent({
       userId: req.user!.id,
       eventType: 'login',
       path: '/api/auth/sync',
       metadata: { email: req.user!.email },
     });
+
     res.json({
       user: {
         id: user!.id,
@@ -163,6 +169,7 @@ router.post('/sync', requireAuth, async (req, res) => {
         createdAt: user!.createdAt.toISOString(),
       },
       usage,
+      subscription,
     });
   } catch (error: any) {
     res.status(500).json({ error: error?.message || 'Failed to sync profile' });

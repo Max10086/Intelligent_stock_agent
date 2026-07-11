@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { Language, AnalysisState } from '../types.ts';
-import { apiFetch, readApiError } from '../utils/authenticatedFetch.ts';
+import { apiFetch, getAuthToken, readApiError } from '../utils/authenticatedFetch.ts';
 
 const QUEUE_CACHE_KEY = 'intelligent-stock-agent:batch-queue-v1';
 const QUEUE_POLL_MS = 15000;
@@ -173,8 +173,15 @@ export const useBatchJobs = (options?: UseBatchJobsOptions) => {
   }, []);
 
   const fetchQueueStatus = useCallback(async () => {
+    if (!getAuthToken()) {
+      return null;
+    }
     try {
       const response = await apiFetch('/api/jobs?limit=50');
+      if (response.status === 401) {
+        setQueueFetchError(null);
+        return null;
+      }
       if (!response.ok) {
         throw new Error(await readApiError(response));
       }

@@ -1,14 +1,28 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { SubscriptionSummary } from '../types/auth.ts';
-import { apiFetch, readApiError } from '../utils/authenticatedFetch.ts';
+import { apiFetch, getAuthToken, readApiError } from '../utils/authenticatedFetch.ts';
 
-export const useSubscriptionStatus = (enabled: boolean) => {
-  const [subscription, setSubscription] = useState<SubscriptionSummary | null>(null);
+const needsBillingEnrichment = (summary: SubscriptionSummary | null): boolean =>
+  Boolean(summary?.hasSubscription && !summary.nextBillingAt);
+
+export const useSubscriptionStatus = (
+  enabled: boolean,
+  initialSubscription: SubscriptionSummary | null = null
+) => {
+  const [subscription, setSubscription] = useState<SubscriptionSummary | null>(initialSubscription);
   const [isLoading, setIsLoading] = useState(false);
 
-  const refresh = useCallback(async () => {
+  useEffect(() => {
     if (!enabled) {
       setSubscription(null);
+      return;
+    }
+    setSubscription(initialSubscription);
+  }, [enabled, initialSubscription]);
+
+  const refresh = useCallback(async () => {
+    if (!enabled || !getAuthToken()) {
+      if (!enabled) setSubscription(null);
       return null;
     }
 
@@ -23,7 +37,6 @@ export const useSubscriptionStatus = (enabled: boolean) => {
       return data;
     } catch (error) {
       console.warn('[subscription] status fetch failed:', error);
-      setSubscription(null);
       return null;
     } finally {
       setIsLoading(false);
@@ -31,8 +44,17 @@ export const useSubscriptionStatus = (enabled: boolean) => {
   }, [enabled]);
 
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    if (!enabled) return;
+
+    if (needsBillingEnrichment(initialSubscription)) {
+      void refresh();
+      return;
+    }
+
+    if (!initialSubscription) {
+      void refresh();
+    }
+  }, [enabled, initialSubscription, refresh]);
 
   return { subscription, isLoading, refresh };
 };

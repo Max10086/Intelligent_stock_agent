@@ -32,7 +32,7 @@ const sendAuthFailure = (res: Response, error: unknown, label: string) => {
   }
 
   if (error instanceof AuthUpstreamError) {
-    if (/invalid|expired|jwt|token/i.test(error.message)) {
+    if (/invalid|expired|jwt|token|session missing/i.test(error.message)) {
       return res.status(401).json({ error: 'Invalid or expired session' });
     }
     console.error(`[auth] ${label} upstream error:`, error.message, error.upstreamCause || '');

@@ -87,7 +87,7 @@ import {
 import { buildMarketCapPromptRule, formatMarketCapForPrompt } from '../utils/priceFormat.ts';
 import { resolveMarketCurrency } from '../utils/marketCurrency.ts';
 import { sanitizeQuickTakeMarketCap } from '../utils/marketCapTextSanitize.ts';
-import { apiFetch } from '../utils/authenticatedFetch.ts';
+import { apiFetch, getAuthToken } from '../utils/authenticatedFetch.ts';
 import { checkUsageQuota, recordCompanyUsage } from '../utils/usageClient.ts';
 import { notifyUsageUpdated } from '../utils/usageEvents.ts';
 
@@ -705,6 +705,7 @@ export const useStockAgent = (options: UseStockAgentOptions = {}) => {
   }, []);
 
   useEffect(() => {
+    if (!getAuthToken()) return;
     syncRuntimeModelConfigFromUserSettings();
   }, [syncRuntimeModelConfigFromUserSettings]);
 

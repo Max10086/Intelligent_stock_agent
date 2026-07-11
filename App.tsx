@@ -3,6 +3,7 @@ import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import { SearchComponent } from './components/SearchComponent.tsx';
 import { AnalysisComponent } from './components/AnalysisComponent.tsx';
 import { BatchQueuePage } from './components/BatchQueuePage.tsx';
+import { BatchJobStatusPanel } from './components/BatchJobStatusPanel.tsx';
 import { ModelSettingsPanel } from './components/ModelSettingsPanel.tsx';
 import { FollowUpConfirmModal } from './components/FollowUpConfirmModal.tsx';
 import { getFollowUpTargetsFromParent } from './utils/followUpHelpers.ts';
@@ -44,16 +45,11 @@ const persistStepTimelinePreference = (visible: boolean) => {
 };
 
 type ViewMode = 'single' | 'batch' | 'compare';
-type ActiveModelSnapshot = {
-  analysis: string | null;
-  search: string | null;
-};
 
 const App: React.FC = () => {
   const [language, setLanguage] = useState<Language>(() => readStoredUiLanguage() ?? 'en');
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [currentView, setCurrentView] = useState<ViewMode>('single');
-  const [activeModels, setActiveModels] = useState<ActiveModelSnapshot>({ analysis: null, search: null });
   const [followUpModal, setFollowUpModal] = useState<{
     parentState: AnalysisState;
     companyIds?: string[];
@@ -63,11 +59,15 @@ const App: React.FC = () => {
   const [isSubscriptionOpen, setIsSubscriptionOpen] = useState(false);
   const uiText = getUIText(language);
   const auth = useAuth();
+  const authReady =
+    auth.isAuthenticated && !auth.isLoading && Boolean(auth.session?.access_token);
   const isPaidMember = Boolean(
-    (auth.usage?.isPaid || auth.user?.isPaid) && !auth.usage?.isAdmin && !auth.user?.isAdmin
+    (auth.usage?.isPaid || auth.user?.isPaid || auth.subscription?.isPaid) &&
+      !auth.usage?.isAdmin &&
+      !auth.user?.isAdmin
   );
   const { subscription, isLoading: isSubscriptionLoading, refresh: refreshSubscription } =
-    useSubscriptionStatus(isPaidMember);
+    useSubscriptionStatus(isPaidMember, auth.subscription);
   const {
     analysisState,
     history,
@@ -95,7 +95,7 @@ const App: React.FC = () => {
     reloadRuntimeModelConfig,
   } = useStockAgent({
     historyFetchEnabled:
-      auth.isAuthenticated && !auth.isLoading && Boolean(auth.user?.id ?? auth.session?.user?.id),
+      authReady && Boolean(auth.user?.id ?? auth.session?.user?.id),
     userId: auth.user?.id ?? auth.session?.user?.id ?? null,
   });
   const { trackEvent } = useAnalytics();
@@ -111,7 +111,7 @@ const App: React.FC = () => {
     retryFailedJob,
   } = useBatchJobs({
     queuePollingEnabled:
-      auth.isAuthenticated && FEATURE_BATCH_QUEUE && currentView === 'batch',
+      authReady && FEATURE_BATCH_QUEUE && currentView === 'batch',
   });
   const companyCompare = useCompanyCompare();
   const [isLoadingCompareSessions, setIsLoadingCompareSessions] = useState(false);
@@ -199,45 +199,16 @@ const App: React.FC = () => {
   }, [auth.refreshUsage]);
 
   useEffect(() => {
-    if (auth.isAuthenticated) {
+    if (authReady) {
       trackEvent('page_view', { view: currentView });
     }
-  }, [auth.isAuthenticated, currentView, trackEvent]);
+  }, [authReady, currentView, trackEvent]);
 
   useEffect(() => {
-    if (auth.isAuthenticated) {
+    if (authReady) {
       void refreshCompareSessions();
     }
-  }, [auth.isAuthenticated, refreshCompareSessions]);
-
-  useEffect(() => {
-    const fetchActiveModel = async () => {
-      try {
-        const response = await fetch('/api/model');
-        if (!response.ok) return;
-        const data = await response.json();
-        const analysis =
-          (typeof data?.analysis?.provider === 'string' &&
-          typeof data?.analysis?.model === 'string' &&
-          data.analysis.provider.trim() &&
-          data.analysis.model.trim())
-            ? `${data.analysis.provider.trim()}:${data.analysis.model.trim()}`
-            : (typeof data?.model === 'string' && data.model.trim() ? data.model.trim() : null);
-        const search =
-          (typeof data?.search?.provider === 'string' &&
-          typeof data?.search?.model === 'string' &&
-          data.search.provider.trim() &&
-          data.search.model.trim())
-            ? `${data.search.provider.trim()}:${data.search.model.trim()}`
-            : null;
-        setActiveModels({ analysis, search });
-      } catch {
-        // Keep UI quiet if backend model endpoint is temporarily unavailable.
-      }
-    };
-
-    fetchActiveModel();
-  }, [runtimeModelConfig.analysis.model, runtimeModelConfig.analysis.provider, runtimeModelConfig.search.model]);
+  }, [authReady, refreshCompareSessions]);
 
   const handleSearch = useCallback(async (query: string) => {
     if (query.trim()) {
@@ -344,8 +315,19 @@ const App: React.FC = () => {
   const isLoadingReportDetails =
     Boolean(loadingReportId) && loadingReportId === analysisState.id;
 
-  // Show batch job status if active
-  const showBatchStatus = FEATURE_BATCH_QUEUE && activeBatchJobId && batchJobStatus;
+  const isBatchJobInProgress =
+    batchJobStatus?.overallStatus === 'PENDING' || batchJobStatus?.overallStatus === 'PROCESSING';
+  const showBatchStatus =
+    FEATURE_BATCH_QUEUE &&
+    Boolean(activeBatchJobId && batchJobStatus) &&
+    isBatchJobInProgress &&
+    analysisState.status === 'idle' &&
+    !isOpeningReport;
+
+  const isViewingCompanyReport =
+    currentView === 'single' && analysisState.status !== 'idle';
+  const showModelSettingsPanel =
+    currentView !== 'batch' && !showBatchStatus && !isViewingCompanyReport;
 
   /** Main search entry (single view, idle) — input form is the only start action. */
   const isSearchHome =
@@ -464,7 +446,7 @@ const App: React.FC = () => {
           trackEvent('history_open');
         }}
         onOpenCompare={() => setCurrentView('compare')}
-        userEmail={auth.user?.email || null}
+        userEmail={auth.user?.email ?? auth.session?.user?.email ?? null}
         onSignOut={() => void auth.signOut()}
         showUpgradeButton={!isPaidMember}
         isPaidMember={isPaidMember}
@@ -485,7 +467,7 @@ const App: React.FC = () => {
         className={
           isSearchHome
             ? 'flex-1 flex flex-col container mx-auto px-4 w-full'
-            : 'container mx-auto px-4 py-8'
+            : 'flex-1 flex flex-col container mx-auto px-4 py-8 w-full'
         }
       >
         <UsageBanner
@@ -524,12 +506,14 @@ const App: React.FC = () => {
           </>
         ) : (
           <>
-            <ModelSettingsPanel
-              language={language}
-              runtimeModelConfig={runtimeModelConfig}
-              onConfigApplied={applyRuntimeModelConfig}
-              isAdmin={isAdmin}
-            />
+            {showModelSettingsPanel && (
+              <ModelSettingsPanel
+                language={language}
+                runtimeModelConfig={runtimeModelConfig}
+                onConfigApplied={applyRuntimeModelConfig}
+                isAdmin={isAdmin}
+              />
+            )}
             {FEATURE_BATCH_QUEUE && currentView === 'batch' ? (
           <BatchQueuePage
             language={language}
@@ -538,9 +522,13 @@ const App: React.FC = () => {
             onRefreshQueue={() => void fetchQueueStatus()}
             submitBatchJob={submitBatchJob}
             retryFailedJob={retryFailedJob}
+            runtimeModelConfig={runtimeModelConfig}
+            onConfigApplied={applyRuntimeModelConfig}
+            isAdmin={isAdmin}
             onLoadReport={({ id, result }) => {
               void loadFromHistory(id, result)
                 .then(() => {
+                  clearBatchJob();
                   setCurrentView('single');
                   window.setTimeout(() => void refreshHistory(), 500);
                 })
@@ -566,73 +554,14 @@ const App: React.FC = () => {
           />
         ) : (
           <>
-            {showBatchStatus ? (
-              <div className="max-w-4xl mx-auto">
-                <div className="bg-gray-800 rounded-lg p-6 mb-6">
-                  <h2 className="text-2xl font-bold mb-4">
-                    {language === 'en' ? 'Batch Job Status' : '批量任务状态'}
-                  </h2>
-                  <div className="space-y-4">
-                    <div className="flex justify-between items-center">
-                      <span className="text-gray-400">
-                        {language === 'en' ? 'Status:' : '状态:'}
-                      </span>
-                      <span className={`font-semibold ${
-                        batchJobStatus.overallStatus === 'COMPLETED' ? 'text-green-400' :
-                        batchJobStatus.overallStatus === 'FAILED' ? 'text-red-400' :
-                        batchJobStatus.overallStatus === 'PROCESSING' ? 'text-blue-400' :
-                        'text-yellow-400'
-                      }`}>
-                        {batchJobStatus.overallStatus}
-                      </span>
-                    </div>
-                    <div className="grid grid-cols-5 gap-4 text-sm">
-                      <div className="text-center">
-                        <div className="text-2xl font-bold">{batchJobStatus.stats.total}</div>
-                        <div className="text-gray-400">{language === 'en' ? 'Total' : '总计'}</div>
-                      </div>
-                      <div className="text-center">
-                        <div className="text-2xl font-bold text-yellow-400">{batchJobStatus.stats.pending}</div>
-                        <div className="text-gray-400">{language === 'en' ? 'Pending' : '等待中'}</div>
-                      </div>
-                      <div className="text-center">
-                        <div className="text-2xl font-bold text-blue-400">{batchJobStatus.stats.processing}</div>
-                        <div className="text-gray-400">{language === 'en' ? 'Processing' : '处理中'}</div>
-                      </div>
-                      <div className="text-center">
-                        <div className="text-2xl font-bold text-green-400">{batchJobStatus.stats.completed}</div>
-                        <div className="text-gray-400">{language === 'en' ? 'Completed' : '已完成'}</div>
-                      </div>
-                      <div className="text-center">
-                        <div className="text-2xl font-bold text-red-400">{batchJobStatus.stats.failed}</div>
-                        <div className="text-gray-400">{language === 'en' ? 'Failed' : '失败'}</div>
-                      </div>
-                    </div>
-                    {isPolling && (
-                      <p className="text-sm text-gray-500 text-center">
-                        {language === 'en' 
-                          ? '⏳ Polling for updates... You can close this page and check back later.'
-                          : '⏳ 正在轮询更新... 您可以关闭此页面，稍后再回来查看。'
-                        }
-                      </p>
-                    )}
-                    <div className="flex gap-2">
-                      <button
-                        onClick={() => setCurrentView('batch')}
-                        className="flex-1 px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded text-white"
-                      >
-                        {language === 'en' ? 'View Full Queue' : '查看完整队列'}
-                      </button>
-                      <button
-                        onClick={clearBatchJob}
-                        className="flex-1 px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-white"
-                      >
-                        {language === 'en' ? 'Close Status' : '关闭状态'}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </div>
+            {showBatchStatus && batchJobStatus ? (
+              <BatchJobStatusPanel
+                language={language}
+                status={batchJobStatus}
+                isPolling={isPolling}
+                onViewQueue={() => setCurrentView('batch')}
+                onDismiss={clearBatchJob}
+              />
             ) : null}
             {analysisState.status === 'idle' && !showBatchStatus && !isOpeningReport ? (
               <SearchComponent
@@ -702,28 +631,6 @@ const App: React.FC = () => {
         </section>
       )}
       <footer className="text-center py-4 text-gray-500 text-sm">
-        {activeModels.analysis && (
-          <p className="mb-1 text-xs text-gray-400">
-            {language === 'cn' ? '当前分析模型' : 'Active Analysis'}: <span className="font-semibold text-gray-300">{activeModels.analysis}</span>
-          </p>
-        )}
-        {activeModels.search && (
-          <p className="mb-1 text-xs text-gray-400">
-            {language === 'cn' ? '当前搜索' : 'Active Search'}:{' '}
-            <span className="font-semibold text-gray-300">{activeModels.search}</span>
-            {runtimeModelConfig.searchMode === 'advanced' && (
-              <span className="text-purple-300 ml-1">
-                · {language === 'cn' ? '高级（豆包+Google）' : 'Advanced (Doubao+Google)'}
-              </span>
-            )}
-            {runtimeModelConfig.searchMode !== 'advanced' &&
-              runtimeModelConfig.analysis.model === 'deepseek-v4-flash' && (
-                <span className="text-amber-300 ml-1">
-                  · {language === 'cn' ? '快速（Flash 分析）' : 'Quick (Flash analysis)'}
-                </span>
-              )}
-          </p>
-        )}
         <p>
           {BRAND.name} · {language === 'cn' ? BRAND.productNameCn : BRAND.productNameEn}.{' '}
           {language === 'cn' ? '仅供参考，不构成投资建议。' : 'For informational purposes only. Not financial advice.'}

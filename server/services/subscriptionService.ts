@@ -63,8 +63,8 @@ export const deactivateUserSubscription = async (
   );
 };
 
-export const getUserSubscriptionSummary = async (userId: string) => {
-  const user = await withPrismaRetry(
+const loadSubscriptionUser = (userId: string) =>
+  withPrismaRetry(
     () =>
       prisma.user.findUnique({
         where: { id: userId },
@@ -78,6 +78,21 @@ export const getUserSubscriptionSummary = async (userId: string) => {
     'subscription.summary'
   );
 
+export const getUserSubscriptionSummaryFast = async (userId: string) => {
+  const user = await loadSubscriptionUser(userId);
+  if (!user) return null;
+
+  return {
+    isPaid: user.isPaid,
+    paidUntil: user.paidUntil?.toISOString() || null,
+    hasSubscription: Boolean(user.paypalSubscriptionId),
+    subscriptionStatus: user.subscriptionStatus,
+    nextBillingAt: null,
+  };
+};
+
+export const getUserSubscriptionSummary = async (userId: string) => {
+  const user = await loadSubscriptionUser(userId);
   if (!user) return null;
 
   let nextBillingAt: string | null = null;
