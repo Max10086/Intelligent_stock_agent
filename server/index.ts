@@ -21,6 +21,7 @@ import { checkDatabaseHealth, disconnectDatabase } from './db.js';
 import { getRuntimeModelConfig } from './aiModelConfig.js';
 import { getPublicSupabaseConfig, getSupabaseEnvStatus } from './lib/publicEnv.js';
 import { getPayPalPublicConfig } from './services/paypalService.js';
+import { searchTicker } from '../services/finance.js';
 
 // --- ESM 路径兼容处理 ---
 const __filename = fileURLToPath(import.meta.url);

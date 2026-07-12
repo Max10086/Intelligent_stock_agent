@@ -63,6 +63,8 @@ const fetchWithTimeout = async (
   }
 };
 
+let cachedToken: { value: string; expiresAt: number } | null = null;
+
 const getAccessToken = async (): Promise<string> => {
   if (!isPayPalConfigured()) {
     throw new Error('PayPal is not configured (PAYPAL_CLIENT_ID / PAYPAL_CLIENT_SECRET)');
