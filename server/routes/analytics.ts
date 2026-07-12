@@ -17,6 +17,9 @@ const ALLOWED_EVENTS = new Set<string>([
   'report_open',
   'usage_limit_hit',
   'search_submit',
+  'paywall_shown',
+  'paywall_dismissed',
+  'report_feedback',
 ]);
 
 router.post('/event', requireAuth, async (req, res) => {

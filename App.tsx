@@ -13,6 +13,8 @@ import { AnalysisState, Language } from './types.ts';
 import { Header } from './components/Header.tsx';
 import { ComparePage } from './components/ComparePage.tsx';
 import { HistorySidebar } from './components/HistorySidebar.tsx';
+import { AdminDashboard } from './components/AdminDashboard.tsx';
+import { FeedbackModal } from './components/FeedbackModal.tsx';
 import { useCompanyCompare } from './hooks/useCompanyCompare.ts';
 import { AnalysisStepTimeline } from './components/AnalysisStepTimeline.tsx';
 import { getUIText, BRAND, FEATURE_BATCH_QUEUE } from './constants.ts';
@@ -23,6 +25,8 @@ import { SubscriptionModal } from './components/SubscriptionModal.tsx';
 import { useSubscriptionStatus } from './hooks/useSubscriptionStatus.ts';
 import { setUsageRefreshCallback } from './utils/usageEvents.ts';
 import { useAnalytics } from './hooks/useAnalytics.ts';
+import { useAdminAccess } from './hooks/useAdminAccess.ts';
+import type { FeedbackCategory } from './types/auth.ts';
 import { resolveRootReportForTicker } from './utils/analysisTimeline.ts';
 import { persistUiLanguage, readStoredUiLanguage } from './utils/uiLanguage.ts';
 
@@ -57,10 +61,23 @@ const App: React.FC = () => {
   const [viewingBaselineReport, setViewingBaselineReport] = useState<AnalysisState | null>(null);
   const [showStepTimeline, setShowStepTimeline] = useState(() => readStoredStepTimelinePreference());
   const [isSubscriptionOpen, setIsSubscriptionOpen] = useState(false);
+  const [isFeedbackOpen, setIsFeedbackOpen] = useState(false);
+  const [feedbackCategory, setFeedbackCategory] = useState<FeedbackCategory>('other');
+  const [feedbackRating, setFeedbackRating] = useState<number | undefined>(undefined);
+  const [feedbackContext, setFeedbackContext] = useState<Record<string, unknown> | undefined>(
+    undefined
+  );
+  const [showAdmin, setShowAdmin] = useState(() =>
+    typeof window !== 'undefined' ? window.location.pathname === '/admin' : false
+  );
   const uiText = getUIText(language);
   const auth = useAuth();
   const authReady =
     auth.isAuthenticated && !auth.isLoading && Boolean(auth.session?.access_token);
+  const { isAdmin: adminFromServer, resolved: adminAccessResolved } = useAdminAccess(
+    authReady,
+    auth.session?.access_token
+  );
   const isPaidMember = Boolean(
     (auth.usage?.isPaid || auth.user?.isPaid || auth.subscription?.isPaid) &&
       !auth.usage?.isAdmin &&
@@ -326,13 +343,28 @@ const App: React.FC = () => {
 
   const isViewingCompanyReport =
     currentView === 'single' && analysisState.status !== 'idle';
+  const isCompareInProgress =
+    currentView === 'compare' &&
+    (companyCompare.isRunning || Boolean(companyCompare.compareProgress));
   const showModelSettingsPanel =
-    currentView !== 'batch' && !showBatchStatus && !isViewingCompanyReport;
+    currentView !== 'batch' &&
+    !showBatchStatus &&
+    !isViewingCompanyReport &&
+    !isCompareInProgress;
 
   /** Main search entry (single view, idle) — input form is the only start action. */
   const isSearchHome =
     currentView === 'single' && analysisState.status === 'idle' && !showBatchStatus;
-  const isAdmin = Boolean(auth.user?.isAdmin || auth.usage?.isAdmin);
+  const isAdmin = Boolean(
+    adminFromServer ||
+      auth.usage?.tier === 'admin' ||
+      auth.user?.isAdmin ||
+      auth.usage?.isAdmin
+  );
+  const isAdminGatePending =
+    auth.isAuthenticated &&
+    !isAdmin &&
+    (auth.isProfileSyncing || !adminAccessResolved || !auth.usage);
   const showNewAnalysisButton = !isSearchHome;
 
   const showStepTimelinePanel =
@@ -345,6 +377,83 @@ const App: React.FC = () => {
   useEffect(() => {
     document.title = BRAND.documentTitle;
   }, []);
+
+  useEffect(() => {
+    const syncAdminRoute = () => {
+      setShowAdmin(window.location.pathname === '/admin');
+    };
+    window.addEventListener('popstate', syncAdminRoute);
+    return () => window.removeEventListener('popstate', syncAdminRoute);
+  }, []);
+
+  useEffect(() => {
+    if (isSubscriptionOpen) {
+      trackEvent('paywall_shown', { source: 'subscription_modal' });
+    }
+  }, [isSubscriptionOpen, trackEvent]);
+
+  useEffect(() => {
+    if (!auth.isAuthenticated || !auth.session) return;
+    void auth.refreshProfile(auth.session).catch(error => {
+      console.warn('[auth] admin profile refresh failed:', error);
+    });
+  }, [auth.isAuthenticated, auth.session?.access_token, auth.refreshProfile]);
+
+  const openFeedback = useCallback(
+    (options?: {
+      category?: FeedbackCategory;
+      rating?: number;
+      context?: Record<string, unknown>;
+    }) => {
+      setFeedbackCategory(options?.category ?? 'other');
+      setFeedbackRating(options?.rating);
+      setFeedbackContext(options?.context);
+      setIsFeedbackOpen(true);
+    },
+    []
+  );
+
+  const openSubscription = useCallback(() => {
+    setIsSubscriptionOpen(true);
+  }, []);
+
+  const closeSubscription = useCallback(() => {
+    if (!isPaidMember) {
+      trackEvent('paywall_dismissed', { source: 'subscription_modal' });
+    }
+    setIsSubscriptionOpen(false);
+  }, [isPaidMember, trackEvent]);
+
+  const openAdmin = useCallback(() => {
+    window.history.pushState({}, '', '/admin');
+    setShowAdmin(true);
+  }, []);
+
+  const closeAdmin = useCallback(() => {
+    window.history.pushState({}, '', '/');
+    setShowAdmin(false);
+  }, []);
+
+  const handleReportFeedback = useCallback(
+    (helpful: boolean) => {
+      trackEvent('report_feedback', {
+        helpful,
+        reportId: analysisState.id,
+        ticker: analysisState.focusCompany?.profile.ticker,
+      });
+      openFeedback({
+        category: 'quality',
+        rating: helpful ? 5 : 2,
+        context: {
+          helpful,
+          reportId: analysisState.id,
+          ticker: analysisState.focusCompany?.profile.ticker,
+          companyName: analysisState.focusCompany?.profile.name,
+        },
+      });
+    },
+    [analysisState.focusCompany?.profile.name, analysisState.focusCompany?.profile.ticker, analysisState.id, openFeedback, trackEvent]
+  );
 
   if (auth.isLoading) {
     return (
@@ -371,6 +480,42 @@ const App: React.FC = () => {
         isConfigured={auth.isConfigured}
       />
     );
+  }
+
+  if (showAdmin) {
+    if (isAdminGatePending) {
+      return (
+        <div className="min-h-screen bg-gray-900 text-gray-100 flex items-center justify-center">
+          <div className="text-center">
+            <div className="inline-block animate-spin rounded-full h-10 w-10 border-b-2 border-blue-400 mb-3" />
+            <p className="text-gray-400 text-sm">
+              {language === 'cn' ? '正在验证管理员权限...' : 'Verifying admin access...'}
+            </p>
+          </div>
+        </div>
+      );
+    }
+
+    if (!isAdmin) {
+      return (
+        <div className="min-h-screen bg-gray-950 text-gray-100 flex items-center justify-center px-4">
+          <div className="max-w-md rounded-xl border border-gray-700 bg-gray-900 p-6 text-center">
+            <p className="text-gray-300">
+              {language === 'cn' ? '需要管理员权限' : 'Admin access required'}
+            </p>
+            <button
+              type="button"
+              onClick={closeAdmin}
+              className="mt-4 rounded-md bg-gray-700 px-4 py-2 text-sm hover:bg-gray-600"
+            >
+              {language === 'cn' ? '返回应用' : 'Back to app'}
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    return <AdminDashboard language={language} onBack={closeAdmin} />;
   }
 
   return (
@@ -431,13 +576,21 @@ const App: React.FC = () => {
               }
             : null)
         }
-        onClose={() => setIsSubscriptionOpen(false)}
+        onClose={closeSubscription}
         onActivated={async () => {
           if (auth.session) {
             await auth.refreshProfile(auth.session);
             await refreshSubscription();
           }
         }}
+      />
+      <FeedbackModal
+        isOpen={isFeedbackOpen}
+        language={language}
+        onClose={() => setIsFeedbackOpen(false)}
+        initialCategory={feedbackCategory}
+        initialRating={feedbackRating}
+        context={feedbackContext}
       />
       <Header
         onReset={handleReset}
@@ -452,7 +605,10 @@ const App: React.FC = () => {
         isPaidMember={isPaidMember}
         subscription={subscription}
         isSubscriptionLoading={isSubscriptionLoading}
-        onUpgrade={() => setIsSubscriptionOpen(true)}
+        onUpgrade={openSubscription}
+        onFeedback={() => openFeedback()}
+        isAdmin={isAdmin}
+        onOpenAdmin={openAdmin}
         language={language}
         onLanguageChange={handleLanguageChange}
         showNewAnalysisButton={showNewAnalysisButton}
@@ -473,7 +629,7 @@ const App: React.FC = () => {
         <UsageBanner
           language={language}
           usage={auth.usage}
-          onUpgrade={() => setIsSubscriptionOpen(true)}
+          onUpgrade={openSubscription}
         />
         {saveStatus !== 'idle' && saveMessage && (
           <div className={`max-w-4xl mx-auto mb-4 rounded-lg border px-4 py-3 flex items-center justify-between ${
@@ -611,6 +767,7 @@ const App: React.FC = () => {
                   onLoadReport={handleLoadFromHistory}
                   parentReportAvailable={Boolean(parentReportForView)}
                   initialReportAvailable={Boolean(initialReportForView)}
+                  onReportFeedback={viewingBaselineReport ? undefined : handleReportFeedback}
                 />
               </>
             ) : null}

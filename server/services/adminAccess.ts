@@ -16,3 +16,8 @@ export const isSuperAdminUser = (user: {
   if (user.isAdmin) return true;
   return parseSuperAdminEmails().has(user.email.trim().toLowerCase());
 };
+
+export const resolveUserIsAdmin = (user: {
+  email: string;
+  isAdmin?: boolean | null;
+}): boolean => isSuperAdminUser(user);

@@ -4,11 +4,13 @@ import { JobStatus } from '@prisma/client';
 import { addToQueue, getQueueStatus, getJobById, retryFailedJob } from '../actions/queue.js';
 import { startQueueProcessing, resetStaleProcessingJobs } from '../actions/process.js';
 import { assertCanAnalyzeCompanies, UsageLimitError } from '../services/usageLimit.js';
+import { trackUserEvent } from '../services/analytics.js';
 
 const router = express.Router();
 
 // POST /api/jobs/batch - Create a new batch job
 router.post('/batch', async (req, res) => {
+  let requestedCompanies = 0;
   try {
     const userId = req.user!.id;
     const { tickers, language = 'en' } = req.body;
@@ -25,6 +27,7 @@ router.post('/batch', async (req, res) => {
       .split(/[,\s]+/)
       .map(t => t.trim())
       .filter(t => t.length > 0);
+    requestedCompanies = tickerList.length;
 
     if (tickerList.length === 0) {
       return res.status(400).json({
@@ -44,6 +47,13 @@ router.post('/batch', async (req, res) => {
     });
 
     const { jobIds, jobs } = await addToQueue(tickerList, language, batchJob.id, userId);
+
+    void trackUserEvent({
+      userId,
+      eventType: 'batch_start',
+      path: '/api/jobs/batch',
+      metadata: { batchJobId: batchJob.id, tickerCount: tickerList.length },
+    });
 
     // Trigger background processing (Fire-and-Forget)
     // This allows the HTTP request to return immediately
@@ -73,6 +83,12 @@ router.post('/batch', async (req, res) => {
   } catch (error: any) {
     console.error('Error creating batch job:', error);
     if (error instanceof UsageLimitError) {
+      void trackUserEvent({
+        userId: req.user!.id,
+        eventType: 'usage_limit_hit',
+        path: '/api/jobs/batch',
+        metadata: { requestedCompanies },
+      });
       return res.status(429).json({
         error: error.message,
         usage: error.summary,

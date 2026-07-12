@@ -6,6 +6,7 @@ import {
   recordCompanyAnalysisUsage,
   UsageLimitError,
 } from '../services/usageLimit.js';
+import { trackUserEvent } from '../services/analytics.js';
 
 const router = express.Router();
 
@@ -28,6 +29,15 @@ router.post('/check', requireAuth, async (req, res) => {
     res.json({ allowed: true, usage });
   } catch (error) {
     if (error instanceof UsageLimitError) {
+      void trackUserEvent({
+        userId: req.user!.id,
+        eventType: 'usage_limit_hit',
+        path: '/api/usage/check',
+        metadata: {
+          requestedCompanies: Math.max(0, Math.min(10, Number(req.body?.requestedCompanies) || 1)),
+          tier: error.summary.tier,
+        },
+      });
       return res.status(429).json({
         allowed: false,
         error: error.message,

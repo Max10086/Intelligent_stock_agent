@@ -7,6 +7,7 @@ import {
   verifyAccessToken,
 } from '../lib/verifyAccessToken.js';
 import { ensureUserProfile } from '../services/userService.js';
+import { trackUserEvent } from '../services/analytics.js';
 
 declare global {
   namespace Express {
@@ -71,13 +72,21 @@ export const requireAuth = async (req: Request, res: Response, next: NextFunctio
 
     try {
       const metadata = authUser.userMetadata || {};
-      await ensureUserProfile(authUser, {
+      const { created } = await ensureUserProfile(authUser, {
         displayName:
           (typeof metadata.full_name === 'string' && metadata.full_name) ||
           (typeof metadata.name === 'string' && metadata.name) ||
           null,
         avatarUrl: (typeof metadata.avatar_url === 'string' && metadata.avatar_url) || null,
       });
+      if (created) {
+        void trackUserEvent({
+          userId: authUser.id,
+          eventType: 'signup_complete',
+          path: req.path,
+          metadata: { email: authUser.email },
+        });
+      }
     } catch (profileError: unknown) {
       console.error('[auth] ensureUserProfile failed:', profileError);
       return res.status(503).json({

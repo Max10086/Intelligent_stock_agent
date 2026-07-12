@@ -12,13 +12,15 @@ import { authRouter } from './routes/auth.js';
 import { billingRouter, handlePayPalWebhook } from './routes/billing.js';
 import { usageRouter } from './routes/usage.js';
 import { analyticsRouter } from './routes/analytics.js';
+import { adminRouter } from './routes/admin.js';
+import { feedbackRouter } from './routes/feedback.js';
 import { requireAuth } from './middleware/auth.js';
 import { startQueueWorker, stopQueueWorker } from './worker.js';
 import { resetStalledJobs } from './actions/process.js';
 import { checkDatabaseHealth, disconnectDatabase } from './db.js';
 import { getRuntimeModelConfig } from './aiModelConfig.js';
 import { getPublicSupabaseConfig, getSupabaseEnvStatus } from './lib/publicEnv.js';
-import { searchTicker } from '../services/finance.js';
+import { getPayPalPublicConfig } from './services/paypalService.js';
 
 // --- ESM 路径兼容处理 ---
 const __filename = fileURLToPath(import.meta.url);
@@ -70,6 +72,7 @@ app.get('/api/public-config', (_req, res) => {
     supabaseUrl,
     supabaseAnonKey,
     authConfigured: Boolean(supabaseUrl && supabaseAnonKey),
+    paypal: getPayPalPublicConfig(),
   });
 });
 
@@ -130,6 +133,8 @@ app.use('/api/auth', authRouter);
 app.use('/api/billing', billingRouter);
 app.use('/api/usage', usageRouter);
 app.use('/api/analytics', analyticsRouter);
+app.use('/api/admin', adminRouter);
+app.use('/api/feedback', feedbackRouter);
 app.use('/api/vertex-ai', vertexAIRouter);
 app.use('/api/jobs', requireAuth, jobsRouter);
 app.use('/api/history', historyRouter);

@@ -2,6 +2,7 @@ import type { UsageSummary } from '../../types/auth.js';
 import { prisma, withPrismaRetry } from '../db.js';
 import { getUserProfile } from './userService.js';
 import { isSuperAdminUser } from './adminAccess.js';
+import { markFirstAnalysisAt } from './userLifecycle.js';
 
 /** First 72 hours after signup: up to this many company analyses, then paywall. */
 export const FREE_WINDOW_HOURS = 72;
@@ -229,6 +230,7 @@ export const recordCompanyAnalysisUsage = async (params: {
       'usage.record',
       2
     );
+    void markFirstAnalysisAt(params.userId);
   } catch (error: any) {
     if (error?.code === 'P2002') {
       return { recorded: false, duplicate: true };

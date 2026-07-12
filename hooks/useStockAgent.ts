@@ -2111,7 +2111,7 @@ ${buildQuickTakeIdentityRule(company, lang)}`;
           )
         );
 
-        const focusAnalysis: CompanyAnalysis = { id: focusProfile.ticker, profile: focusProfile, quickTake: companyQuickTakes[0] || null, status: 'pending', questions: [], qna: [], conclusion: null, finalConclusion: null, followUpQuestions: [] };
+        const focusAnalysis: CompanyAnalysis = { id: focusProfile.ticker, profile: focusProfile, quickTake: companyQuickTakes[0] || null, status: 'generating_questions', questions: [], qna: [], conclusion: null, finalConclusion: null, followUpQuestions: [] };
         const candidateAnalyses: CompanyAnalysis[] = candidateProfiles.map((p, idx) => ({ id: p.ticker, profile: p, quickTake: companyQuickTakes[idx + 1] || null, status: 'awaiting_user', questions: [], qna: [], conclusion: null, finalConclusion: null, followUpQuestions: [] }));
 
         updateState({
@@ -2119,6 +2119,7 @@ ${buildQuickTakeIdentityRule(company, lang)}`;
             focusCompany: focusAnalysis,
             candidateCompanies: candidateAnalyses,
             currentStage: getUIText(lang).analyzingCompany.replace('{companyName}', focusProfile.name),
+            currentProgress: 18,
             clientSessionId: id,
         });
 
@@ -2350,7 +2351,7 @@ ${buildQuickTakeIdentityRule(company, lang)}`;
         profile: refreshedProfile,
         quickTake: parentCompany.quickTake ?? null,
         priorBaseline: baselines[parentCompany.id],
-        status: 'pending',
+        status: 'generating_questions',
         questions: [],
         qna: [],
         conclusion: null,

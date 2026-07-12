@@ -10,6 +10,7 @@ import {
   issueRegistrationCode,
   verifyRegistrationCode,
 } from '../services/registrationService.js';
+import { resolveUserIsAdmin } from '../services/adminAccess.js';
 
 const router = express.Router();
 
@@ -127,7 +128,7 @@ router.get('/me', requireAuth, async (req, res) => {
         displayName: user.displayName,
         avatarUrl: user.avatarUrl,
         isPaid: user.isPaid,
-        isAdmin: user.isAdmin,
+        isAdmin: resolveUserIsAdmin(user),
         paidUntil: user.paidUntil?.toISOString() || null,
         subscriptionStatus: user.subscriptionStatus,
         hasSubscription: Boolean(user.paypalSubscriptionId),
@@ -148,6 +149,10 @@ router.post('/sync', requireAuth, async (req, res) => {
       getUserSubscriptionSummaryFast(req.user!.id),
     ]);
 
+    if (!user) {
+      return res.status(404).json({ error: 'User profile not found' });
+    }
+
     void trackUserEvent({
       userId: req.user!.id,
       eventType: 'login',
@@ -157,16 +162,16 @@ router.post('/sync', requireAuth, async (req, res) => {
 
     res.json({
       user: {
-        id: user!.id,
-        email: user!.email,
-        displayName: user!.displayName,
-        avatarUrl: user!.avatarUrl,
-        isPaid: user!.isPaid,
-        isAdmin: user!.isAdmin,
-        paidUntil: user!.paidUntil?.toISOString() || null,
-        subscriptionStatus: user!.subscriptionStatus,
-        hasSubscription: Boolean(user!.paypalSubscriptionId),
-        createdAt: user!.createdAt.toISOString(),
+        id: user.id,
+        email: user.email,
+        displayName: user.displayName,
+        avatarUrl: user.avatarUrl,
+        isPaid: user.isPaid,
+        isAdmin: resolveUserIsAdmin(user),
+        paidUntil: user.paidUntil?.toISOString() || null,
+        subscriptionStatus: user.subscriptionStatus,
+        hasSubscription: Boolean(user.paypalSubscriptionId),
+        createdAt: user.createdAt.toISOString(),
       },
       usage,
       subscription,

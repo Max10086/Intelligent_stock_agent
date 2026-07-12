@@ -22,6 +22,9 @@ interface HeaderProps {
   userEmail?: string | null;
   onSignOut?: () => void;
   onUpgrade?: () => void;
+  onFeedback?: () => void;
+  isAdmin?: boolean;
+  onOpenAdmin?: () => void;
   showUpgradeButton?: boolean;
   isPaidMember?: boolean;
   subscription?: SubscriptionSummary | null;
@@ -42,6 +45,9 @@ export const Header: React.FC<HeaderProps> = ({
   userEmail,
   onSignOut,
   onUpgrade,
+  onFeedback,
+  isAdmin = false,
+  onOpenAdmin,
   showUpgradeButton = false,
   isPaidMember = false,
   subscription = null,
@@ -52,18 +58,28 @@ export const Header: React.FC<HeaderProps> = ({
   return (
     <header className="bg-gray-900/80 backdrop-blur-sm sticky top-0 z-20 border-b border-gray-700">
       <div className="container mx-auto px-4 py-3 flex justify-between items-center">
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 min-w-0">
           <button
             onClick={onToggleHistory}
-            className="p-2 rounded-full hover:bg-gray-700 transition-colors"
+            className="p-2 rounded-full hover:bg-gray-700 transition-colors shrink-0"
             aria-label={uiText.history}
             title={uiText.history}
           >
             <HistoryIcon className="w-6 h-6 text-gray-300" />
           </button>
-          <BrandMark language={language} variant="header" className="hidden sm:block" />
+          {isAdmin && onOpenAdmin && (
+            <button
+              type="button"
+              onClick={onOpenAdmin}
+              className="px-2.5 py-1.5 text-xs sm:text-sm font-semibold text-amber-200 bg-amber-500/15 border border-amber-500/40 rounded-md hover:bg-amber-500/25 shrink-0"
+              title={uiText.adminButton}
+            >
+              {uiText.adminButton}
+            </button>
+          )}
+          <BrandMark language={language} variant="header" className="hidden sm:block min-w-0" />
         </div>
-        <div className="flex items-center gap-2 sm:gap-3">
+        <div className="flex items-center gap-2 sm:gap-3 overflow-x-auto max-w-[72vw] sm:max-w-none justify-end">
           {onViewChange && (
             <div className="flex bg-gray-700 rounded-md p-1">
               <button
@@ -118,6 +134,15 @@ export const Header: React.FC<HeaderProps> = ({
               className="px-3 py-2 text-sm font-semibold text-gray-900 bg-amber-400 rounded-md hover:bg-amber-300"
             >
               {uiText.upgrade}
+            </button>
+          )}
+          {onFeedback && (
+            <button
+              type="button"
+              onClick={onFeedback}
+              className="px-3 py-2 text-sm font-medium text-gray-200 bg-gray-700 rounded-md hover:bg-gray-600 shrink-0"
+            >
+              {uiText.feedbackButton}
             </button>
           )}
           {isPaidMember && (

@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { getPayPalPublicConfig, preloadPayPalSdk } from '../lib/publicRuntimeConfig.ts';
 import { apiFetch, readApiError } from '../utils/authenticatedFetch.ts';
 
 export type PayPalBillingConfig = {
@@ -19,27 +20,27 @@ declare global {
   }
 }
 
-const loadPayPalSdk = (clientId: string): Promise<void> => {
-  if (window.paypal) return Promise.resolve();
+const logCheckoutStep = (step: string, startedAt: number) => {
+  if (import.meta.env.DEV) {
+    console.info(`[paypal] ${step}: ${Math.round(performance.now() - startedAt)}ms`);
+  }
+};
 
-  const existing = document.querySelector<HTMLScriptElement>('script[data-paypal-sdk="true"]');
-  if (existing) {
-    return new Promise((resolve, reject) => {
-      existing.addEventListener('load', () => resolve());
-      existing.addEventListener('error', () => reject(new Error('Failed to load PayPal SDK')));
-      if (window.paypal) resolve();
-    });
+const resolveBillingConfig = async (): Promise<PayPalBillingConfig> => {
+  const cached = getPayPalPublicConfig();
+  if (cached) {
+    return cached;
   }
 
-  return new Promise((resolve, reject) => {
-    const script = document.createElement('script');
-    script.src = `https://www.paypal.com/sdk/js?client-id=${encodeURIComponent(clientId)}&vault=true&intent=subscription`;
-    script.async = true;
-    script.dataset.paypalSdk = 'true';
-    script.onload = () => resolve();
-    script.onerror = () => reject(new Error('Failed to load PayPal SDK'));
-    document.body.appendChild(script);
-  });
+  const response = await apiFetch('/api/billing/config');
+  if (!response.ok) {
+    throw new Error(await readApiError(response));
+  }
+  const config = (await response.json()) as PayPalBillingConfig;
+  if (!config.configured || !config.clientId || !config.planId) {
+    throw new Error('PayPal billing is not configured');
+  }
+  return config;
 };
 
 interface PayPalSubscribeButtonProps {
@@ -60,6 +61,7 @@ export const PayPalSubscribeButton: React.FC<PayPalSubscribeButtonProps> = ({
   const containerRef = useRef<HTMLDivElement>(null);
   const containerIdRef = useRef(`paypal-button-${Math.random().toString(36).slice(2)}`);
   const [isLoading, setIsLoading] = useState(true);
+  const [loadingStep, setLoadingStep] = useState<string | null>(null);
   const [isActivating, setIsActivating] = useState(false);
   const renderedRef = useRef(false);
 
@@ -88,21 +90,25 @@ export const PayPalSubscribeButton: React.FC<PayPalSubscribeButtonProps> = ({
   useEffect(() => {
     if (disabled || renderedRef.current) return;
     let cancelled = false;
+    const startedAt = performance.now();
 
     const setup = async () => {
       try {
-        const response = await apiFetch('/api/billing/config');
-        if (!response.ok) {
-          throw new Error(await readApiError(response));
-        }
-        const config = (await response.json()) as PayPalBillingConfig;
-        if (!config.configured || !config.clientId || !config.planId) {
-          throw new Error('PayPal billing is not configured');
-        }
+        setLoadingStep('config');
+        const config = await resolveBillingConfig();
+        logCheckoutStep('config ready', startedAt);
+        if (cancelled) return;
 
-        await loadPayPalSdk(config.clientId);
+        setLoadingStep('sdk');
+        const sdkPromise = preloadPayPalSdk(config.clientId);
+        if (!sdkPromise) {
+          throw new Error('Failed to start PayPal SDK load');
+        }
+        await sdkPromise;
+        logCheckoutStep('sdk ready', startedAt);
         if (cancelled || !containerRef.current || !window.paypal) return;
 
+        setLoadingStep('button');
         await window.paypal
           .Buttons({
             style: {
@@ -134,12 +140,16 @@ export const PayPalSubscribeButton: React.FC<PayPalSubscribeButtonProps> = ({
           .render(`#${containerIdRef.current}`);
 
         renderedRef.current = true;
+        logCheckoutStep('button rendered', startedAt);
       } catch (error) {
         if (!cancelled) {
           onError(error instanceof Error ? error.message : 'Failed to load PayPal checkout');
         }
       } finally {
-        if (!cancelled) setIsLoading(false);
+        if (!cancelled) {
+          setIsLoading(false);
+          setLoadingStep(null);
+        }
       }
     };
 
@@ -161,7 +171,13 @@ export const PayPalSubscribeButton: React.FC<PayPalSubscribeButtonProps> = ({
   return (
     <div className="space-y-3">
       {isLoading && (
-        <p className="text-sm text-gray-400">Loading PayPal checkout...</p>
+        <p className="text-sm text-gray-400">
+          {loadingStep === 'sdk'
+            ? 'Loading PayPal checkout (SDK)...'
+            : loadingStep === 'button'
+              ? 'Rendering PayPal button...'
+              : 'Loading PayPal checkout...'}
+        </p>
       )}
       {isActivating && (
         <p className="text-sm text-blue-300">Activating your subscription...</p>

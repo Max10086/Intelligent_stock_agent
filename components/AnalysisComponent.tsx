@@ -3,6 +3,7 @@ import React, { useMemo, useState } from 'react';
 import { AnalysisState, Language } from '../types.ts';
 import { LoadingComponent } from './LoadingComponent.tsx';
 import { CompanyReport } from './CompanyReport.tsx';
+import { ReportFeedbackBar } from './ReportFeedbackBar.tsx';
 import { FollowUpSummaryBanner } from './FollowUpSummaryBanner.tsx';
 import { CompanyTimelineStrip } from './CompanyTimelineStrip.tsx';
 import { getUIText } from '../constants.ts';
@@ -28,6 +29,7 @@ interface AnalysisComponentProps {
   parentReportAvailable?: boolean;
   initialReportAvailable?: boolean;
   isLoadingReportDetails?: boolean;
+  onReportFeedback?: (helpful: boolean) => void;
 }
 
 export const AnalysisComponent: React.FC<AnalysisComponentProps> = ({
@@ -43,6 +45,7 @@ export const AnalysisComponent: React.FC<AnalysisComponentProps> = ({
   parentReportAvailable = false,
   initialReportAvailable = false,
   isLoadingReportDetails = false,
+  onReportFeedback,
 }) => {
   const [activeTab, setActiveTab] = useState<string | null>(analysisState.focusCompany?.id ?? null);
   const [comparisonMode, setComparisonMode] = useState<ComparisonBaselineMode>('previous');
@@ -112,8 +115,9 @@ export const AnalysisComponent: React.FC<AnalysisComponentProps> = ({
 
   const allCompanies = [analysisState.focusCompany, ...analysisState.candidateCompanies];
   const incompleteCompanies = findIncompleteCompanies(allCompanies);
-  const showGlobalProgress =
-    analysisState.status === 'analyzing' && incompleteCompanies.length > 0;
+  // Keep the global bar visible for the entire analyzing session. Previously we only
+  // showed it once qna had started, which hid the bar after financials loaded.
+  const showGlobalProgress = analysisState.status === 'analyzing';
   const reportTimestamp = analysisState.timestamp
     ? new Date(analysisState.timestamp).toLocaleString()
     : null;
@@ -172,7 +176,11 @@ export const AnalysisComponent: React.FC<AnalysisComponentProps> = ({
         </div>
       )}
       {showGlobalProgress && (
-        <LoadingComponent stage={analysisState.currentStage} progress={analysisState.currentProgress} />
+        <LoadingComponent
+          stage={analysisState.currentStage}
+          progress={analysisState.currentProgress}
+          sticky
+        />
       )}
 
       {onLoadReport && timelineEntries.length > 1 && (
@@ -266,6 +274,15 @@ export const AnalysisComponent: React.FC<AnalysisComponentProps> = ({
           ))}
         </div>
       </div>
+
+      {onReportFeedback &&
+        (analysisState.status === 'complete' || analysisState.status === 'partial') && (
+          <ReportFeedbackBar
+            language={language}
+            onPositive={() => onReportFeedback(true)}
+            onNegative={() => onReportFeedback(false)}
+          />
+        )}
     </div>
   );
 };

@@ -1,6 +1,7 @@
 import { prisma, withPrismaRetry } from '../db.js';
 import type { PayPalSubscription } from './paypalService.js';
 import { getPayPalSubscription, isPayPalConfigured } from './paypalService.js';
+import { markPaidAt } from './userLifecycle.js';
 
 export const activateUserSubscription = async (
   userId: string,
@@ -34,7 +35,10 @@ export const activateUserSubscription = async (
         },
       }),
     'subscription.activate'
-  );
+  ).then(async user => {
+    await markPaidAt(userId);
+    return user;
+  });
 };
 
 export const deactivateUserSubscription = async (
@@ -102,7 +106,24 @@ export const getUserSubscriptionSummary = async (userId: string) => {
       const subscription = await getPayPalSubscription(user.paypalSubscriptionId);
       nextBillingAt = subscription.billing_info?.next_billing_time || null;
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       console.warn('[subscription] PayPal billing lookup failed:', error);
+      if (/404|RESOURCE_NOT_FOUND|INVALID_RESOURCE_ID/i.test(message)) {
+        void withPrismaRetry(
+          () =>
+            prisma.user.update({
+              where: { id: userId },
+              data: {
+                paypalSubscriptionId: null,
+                subscriptionStatus: 'NOT_FOUND',
+                isPaid: false,
+              },
+            }),
+          'subscription.clearStalePayPalId'
+        ).catch(clearError => {
+          console.warn('[subscription] failed to clear stale PayPal id:', clearError);
+        });
+      }
     }
   }
 

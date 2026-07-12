@@ -51,6 +51,7 @@ export const useAuth = () => {
 
   const syncInFlightRef = useRef<Promise<void> | null>(null);
   const lastSyncedTokenRef = useRef<string | null>(null);
+  const profileHydratedRef = useRef(false);
 
   const applySessionTokens = useCallback((session: Session | null) => {
     const token = session?.access_token || null;
@@ -61,17 +62,18 @@ export const useAuth = () => {
   const syncProfile = useCallback(async (session: Session | null) => {
     if (!session?.access_token) {
       lastSyncedTokenRef.current = null;
+      profileHydratedRef.current = false;
       setState(prev => ({ ...prev, user: null, usage: null, subscription: null, isProfileSyncing: false }));
       return;
     }
 
-    if (lastSyncedTokenRef.current === session.access_token) {
+    if (lastSyncedTokenRef.current === session.access_token && profileHydratedRef.current) {
       return;
     }
 
     if (syncInFlightRef.current) {
       await syncInFlightRef.current;
-      if (lastSyncedTokenRef.current === session.access_token) {
+      if (lastSyncedTokenRef.current === session.access_token && profileHydratedRef.current) {
         return;
       }
     }
@@ -81,7 +83,10 @@ export const useAuth = () => {
     setState(prev => ({
       ...prev,
       isProfileSyncing: true,
-      user: prev.user?.id === session.user.id ? prev.user : profileFromSession(session),
+      user:
+        prev.user?.id === session.user.id
+          ? prev.user
+          : profileFromSession(session),
     }));
 
     const syncTask = (async () => {
@@ -91,20 +96,24 @@ export const useAuth = () => {
       }
       const data = await response.json();
       lastSyncedTokenRef.current = session.access_token;
+      const user = data.user as UserProfile;
+      const usage = data.usage as UsageSummary;
       setState(prev => ({
         ...prev,
-        user: data.user as UserProfile,
-        usage: data.usage as UsageSummary,
+        user: { ...user, isAdmin: Boolean(user.isAdmin || usage.isAdmin) },
+        usage,
         subscription: (data.subscription as SubscriptionSummary | null) ?? null,
         isProfileSyncing: false,
         error: null,
       }));
+      profileHydratedRef.current = true;
     })();
 
     syncInFlightRef.current = syncTask;
     try {
       await syncTask;
     } catch (error) {
+      profileHydratedRef.current = false;
       setState(prev => ({
         ...prev,
         isProfileSyncing: false,
@@ -216,6 +225,8 @@ export const useAuth = () => {
               ? prev.user
               : profileFromSession(session)
             : null,
+          usage: session ? prev.usage : null,
+          subscription: session ? prev.subscription : null,
         }));
         if (session) {
           void syncProfile(session).catch(error => {
@@ -227,6 +238,7 @@ export const useAuth = () => {
           });
         } else {
           lastSyncedTokenRef.current = null;
+          profileHydratedRef.current = false;
           setCachedAccessToken(null);
           setState(prev => ({
             ...prev,
@@ -346,6 +358,7 @@ export const useAuth = () => {
     if (!client) return;
     await client.auth.signOut();
     lastSyncedTokenRef.current = null;
+    profileHydratedRef.current = false;
     setCachedAccessToken(null);
     setState(prev => ({
       ...prev,
@@ -356,6 +369,12 @@ export const useAuth = () => {
       isProfileSyncing: false,
     }));
   }, []);
+
+  const refreshProfile = useCallback(async (session: Session | null) => {
+    lastSyncedTokenRef.current = null;
+    profileHydratedRef.current = false;
+    await syncProfile(session);
+  }, [syncProfile]);
 
   const isAuthenticated = Boolean(state.session?.access_token);
 
@@ -370,8 +389,8 @@ export const useAuth = () => {
       signInWithEmail,
       signOut,
       refreshUsage,
-      refreshProfile: syncProfile,
+      refreshProfile,
     }),
-    [state, isAuthenticated, signInWithGoogle, sendSignUpCode, completeSignUp, signInWithEmail, signOut, refreshUsage, syncProfile]
+    [state, isAuthenticated, signInWithGoogle, sendSignUpCode, completeSignUp, signInWithEmail, signOut, refreshUsage, refreshProfile, syncProfile]
   );
 };

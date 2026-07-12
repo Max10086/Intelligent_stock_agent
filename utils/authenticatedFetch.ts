@@ -25,7 +25,10 @@ const buildRequestInit = (init: RequestInit | undefined, token: string | null): 
   if (init?.body && !headers.has('Content-Type') && typeof init.body === 'string') {
     headers.set('Content-Type', 'application/json');
   }
-  return { ...init, headers };
+  if (!headers.has('Cache-Control')) {
+    headers.set('Cache-Control', 'no-cache');
+  }
+  return { ...init, headers, cache: init?.cache ?? 'no-store' };
 };
 
 export const apiFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {

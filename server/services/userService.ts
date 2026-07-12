@@ -7,8 +7,14 @@ export const ensureUserProfile = async (
     displayName?: string | null;
     avatarUrl?: string | null;
   }
-) => {
-  return withPrismaRetry(
+): Promise<{ user: Awaited<ReturnType<typeof prisma.user.upsert>>; created: boolean }> => {
+  const existing = await withPrismaRetry(
+    () => prisma.user.findUnique({ where: { id: authUser.id }, select: { id: true } }),
+    'user.lookup',
+    2
+  );
+
+  const user = await withPrismaRetry(
     () =>
       prisma.user.upsert({
         where: { id: authUser.id },
@@ -27,6 +33,8 @@ export const ensureUserProfile = async (
     'user.upsert',
     2
   );
+
+  return { user, created: !existing };
 };
 
 export const getUserProfile = async (userId: string) =>

@@ -1,5 +1,5 @@
 import express from 'express';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAuth, requireAuthLite } from '../middleware/auth.js';
 import { trackUserEvent } from '../services/analytics.js';
 import { getUsageSummary } from '../services/usageLimit.js';
 import { getUserProfile } from '../services/userService.js';
@@ -30,7 +30,7 @@ const formatUserResponse = (user: NonNullable<Awaited<ReturnType<typeof getUserP
   createdAt: user.createdAt.toISOString(),
 });
 
-router.get('/config', requireAuth, (_req, res) => {
+router.get('/config', requireAuthLite, (_req, res) => {
   const config = getPayPalPublicConfig();
   if (!config.configured || !config.clientId) {
     return res.status(503).json({
@@ -127,6 +127,12 @@ export const handlePayPalWebhook = async (
       const subscription = await getPayPalSubscription(subscriptionId);
       if (subscription.plan_id === getPayPalPlanId() && subscription.custom_id) {
         await activateUserSubscription(subscription.custom_id, subscription);
+        void trackUserEvent({
+          userId: subscription.custom_id,
+          eventType: 'subscription_activated',
+          path: '/api/billing/paypal/webhook',
+          metadata: { subscriptionId, planId: subscription.plan_id, status: subscription.status },
+        });
       }
     } else if (
       eventType === 'BILLING.SUBSCRIPTION.CANCELLED' ||
@@ -134,7 +140,15 @@ export const handlePayPalWebhook = async (
       eventType === 'BILLING.SUBSCRIPTION.SUSPENDED' ||
       (payload.resource?.status && DEACTIVATE_STATUSES.has(payload.resource.status))
     ) {
-      await deactivateUserSubscription(subscriptionId, status);
+      const updated = await deactivateUserSubscription(subscriptionId, status);
+      if (updated) {
+        void trackUserEvent({
+          userId: updated.id,
+          eventType: 'subscription_cancelled',
+          path: '/api/billing/paypal/webhook',
+          metadata: { subscriptionId, status, eventType },
+        });
+      }
     }
 
     res.status(200).json({ ok: true });

@@ -42,7 +42,26 @@ const getPayPalApiBase = (): string =>
     ? 'https://api-m.sandbox.paypal.com'
     : 'https://api-m.paypal.com';
 
-let cachedToken: { value: string; expiresAt: number } | null = null;
+const PAYPAL_FETCH_TIMEOUT_MS = 8_000;
+
+const fetchWithTimeout = async (
+  input: string,
+  init: RequestInit,
+  timeoutMs = PAYPAL_FETCH_TIMEOUT_MS
+): Promise<Response> => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error(`PayPal API timed out after ${timeoutMs}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+};
 
 const getAccessToken = async (): Promise<string> => {
   if (!isPayPalConfigured()) {
@@ -57,7 +76,7 @@ const getAccessToken = async (): Promise<string> => {
   const clientSecret = readEnv('PAYPAL_CLIENT_SECRET');
   const credentials = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
 
-  const response = await fetch(`${getPayPalApiBase()}/v1/oauth2/token`, {
+  const response = await fetchWithTimeout(`${getPayPalApiBase()}/v1/oauth2/token`, {
     method: 'POST',
     headers: {
       Authorization: `Basic ${credentials}`,
@@ -81,7 +100,7 @@ const getAccessToken = async (): Promise<string> => {
 
 export const getPayPalSubscription = async (subscriptionId: string): Promise<PayPalSubscription> => {
   const token = await getAccessToken();
-  const response = await fetch(
+  const response = await fetchWithTimeout(
     `${getPayPalApiBase()}/v1/billing/subscriptions/${encodeURIComponent(subscriptionId)}`,
     {
       headers: {

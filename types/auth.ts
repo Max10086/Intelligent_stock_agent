@@ -46,14 +46,31 @@ export interface SubscriptionSummary {
 export type AnalyticsEventType =
   | 'login'
   | 'logout'
+  | 'signup_complete'
   | 'page_view'
   | 'analysis_start'
   | 'analysis_complete'
+  | 'first_analysis'
   | 'candidate_analysis_start'
   | 'follow_up_start'
+  | 'batch_start'
   | 'compare_start'
   | 'compare_complete'
   | 'history_open'
   | 'report_open'
   | 'usage_limit_hit'
-  | 'search_submit';
+  | 'search_submit'
+  | 'paywall_shown'
+  | 'paywall_dismissed'
+  | 'subscription_activated'
+  | 'subscription_cancelled'
+  | 'report_feedback';
+
+export type FeedbackCategory = 'bug' | 'feature' | 'quality' | 'pricing' | 'other';
+
+export interface FeedbackPayload {
+  category: FeedbackCategory;
+  message: string;
+  rating?: number;
+  context?: Record<string, unknown>;
+}
