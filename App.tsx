@@ -343,14 +343,11 @@ const App: React.FC = () => {
 
   const isViewingCompanyReport =
     currentView === 'single' && analysisState.status !== 'idle';
-  const isCompareInProgress =
-    currentView === 'compare' &&
-    (companyCompare.isRunning || Boolean(companyCompare.compareProgress));
   const showModelSettingsPanel =
     currentView !== 'batch' &&
+    currentView !== 'compare' &&
     !showBatchStatus &&
-    !isViewingCompanyReport &&
-    !isCompareInProgress;
+    !isViewingCompanyReport;
 
   /** Main search entry (single view, idle) — input form is the only start action. */
   const isSearchHome =
@@ -622,8 +619,8 @@ const App: React.FC = () => {
       <main
         className={
           isSearchHome
-            ? 'flex-1 flex flex-col container mx-auto px-4 w-full'
-            : 'flex-1 flex flex-col container mx-auto px-4 py-8 w-full'
+            ? 'flex-1 flex flex-col container mx-auto px-4 w-full min-w-0 overflow-x-hidden'
+            : 'flex-1 flex flex-col container mx-auto px-4 py-8 w-full min-w-0 overflow-x-hidden'
         }
       >
         <UsageBanner

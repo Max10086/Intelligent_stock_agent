@@ -397,7 +397,7 @@ export const ComparePage: React.FC<ComparePageProps> = ({
 
   if (compareProgress || isRunning) {
     return (
-      <div className="max-w-5xl mx-auto space-y-4">
+      <div className="w-full min-w-0 max-w-5xl mx-auto space-y-4 overflow-x-hidden">
         {!activeRun && (
           <button
             type="button"
@@ -441,7 +441,7 @@ export const ComparePage: React.FC<ComparePageProps> = ({
 
   if (activeRun) {
     return (
-      <div className="max-w-5xl mx-auto space-y-4">
+      <div className="w-full min-w-0 max-w-5xl mx-auto space-y-4 overflow-x-hidden">
         <button
           type="button"
           onClick={() => setActiveRun(null)}
@@ -503,7 +503,7 @@ export const ComparePage: React.FC<ComparePageProps> = ({
                     key={`${item.reportId}::${item.companyId}`}
                     className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-gray-700 text-sm"
                   >
-                    {item.name} ({item.ticker})
+                    {item.name} {item.ticker ? `(${item.ticker})` : ''}
                     <button
                       type="button"
                       className="text-gray-400 hover:text-white"
@@ -572,7 +572,7 @@ export const ComparePage: React.FC<ComparePageProps> = ({
                               }}
                             />
                             <span className="text-sm">
-                              {company.name} ({company.ticker})
+                              {company.name} {company.ticker ? `(${company.ticker})` : ''}
                               <span className="text-gray-500 ml-2">
                                 {company.role} · {company.reportLanguage.toUpperCase()}
                               </span>

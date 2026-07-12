@@ -2,6 +2,7 @@ import React, { useMemo } from 'react';
 import type { Language } from '../types.ts';
 import type { CompareRunProgress, CompareRunStep, ComparisonItem } from '../types/compare.ts';
 import type { EligibleCompareCompany } from '../utils/compareEligible.ts';
+import { buildCompareBasketKey } from '../utils/compareEligible.ts';
 import { getUIText } from '../constants.ts';
 
 const COMPARE_STEPS: CompareRunStep[] = [
@@ -34,10 +35,12 @@ interface CompareProgressPanelProps {
   onOpenHistorySidebar?: () => void;
 }
 
-const resolveCompanyLabel = (item: ComparisonItem | EligibleCompareCompany): { name: string; ticker: string } => ({
-  name: item.name,
-  ticker: item.ticker,
-});
+const formatCompanyChip = (name: string, ticker: string): string => {
+  const safeName = name.trim();
+  const safeTicker = ticker.trim();
+  if (safeName && safeTicker) return `${safeName} (${safeTicker})`;
+  return safeName || safeTicker || '—';
+};
 
 export const CompareProgressPanel: React.FC<CompareProgressPanelProps> = ({
   language,
@@ -49,29 +52,48 @@ export const CompareProgressPanel: React.FC<CompareProgressPanelProps> = ({
   const currentIndex = COMPARE_STEPS.indexOf(progress.currentStep || 'loading_reports');
 
   const companies = useMemo(() => {
-    if (progress.items?.length) {
-      return progress.items.map(item => resolveCompanyLabel(item));
-    }
-    return pendingCompanies.map(item => resolveCompanyLabel(item));
+    const pendingByKey = new Map(
+      pendingCompanies.map(item => [
+        buildCompareBasketKey(item.reportId, item.companyId),
+        { name: item.name?.trim() || '', ticker: item.ticker?.trim() || '' },
+      ])
+    );
+
+    const sourceItems =
+      progress.items?.length && progress.items.length > 0
+        ? progress.items
+        : pendingCompanies;
+
+    return sourceItems
+      .map(item => {
+        const key = buildCompareBasketKey(item.reportId, item.companyId);
+        const pending = pendingByKey.get(key);
+        const name = (item.name || pending?.name || '').trim();
+        const ticker = (item.ticker || pending?.ticker || '').trim();
+        return { key, name, ticker };
+      })
+      .filter(item => item.name || item.ticker);
   }, [pendingCompanies, progress.items]);
 
   return (
-    <div className="space-y-6">
+    <div className="w-full min-w-0 max-w-full space-y-6">
       <div>
         <h2 className="text-xl font-bold text-gray-100">{ui.compareProgressTitle}</h2>
         <p className="text-sm text-gray-400 mt-1">{ui.compareProgressSubtitle}</p>
       </div>
 
-      <div className="rounded-lg border border-blue-500/30 bg-blue-950/20 p-4 space-y-4">
+      <div className="rounded-lg border border-blue-500/30 bg-blue-950/20 p-4 space-y-4 w-full min-w-0">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <span className="text-sm text-blue-200">
+          <span className="text-sm text-blue-200 tabular-nums shrink-0">
             {ui.compareProgressPercent.replace('{percent}', String(progress.progress))}
           </span>
-          <span className="text-xs font-mono text-gray-500">{progress.runId.slice(0, 8)}…</span>
+          <span className="text-xs font-mono text-gray-500 truncate max-w-[40%]">
+            {progress.runId ? `${progress.runId.slice(0, 8)}…` : ''}
+          </span>
         </div>
-        <div className="h-2.5 bg-gray-700 rounded-full overflow-hidden">
+        <div className="h-2.5 bg-gray-700 rounded-full overflow-hidden w-full">
           <div
-            className="h-full bg-blue-500 rounded-full transition-all duration-500 ease-out"
+            className="h-full bg-blue-500 rounded-full transition-[width] duration-500 ease-out"
             style={{ width: `${Math.min(100, progress.progress)}%` }}
           />
         </div>
@@ -79,22 +101,22 @@ export const CompareProgressPanel: React.FC<CompareProgressPanelProps> = ({
       </div>
 
       {companies.length > 0 && (
-        <div className="rounded-lg border border-gray-700 bg-gray-800/60 p-4 space-y-3">
+        <div className="rounded-lg border border-gray-700 bg-gray-800/60 p-4 space-y-3 w-full min-w-0">
           <h3 className="text-sm font-semibold text-gray-300">{ui.compareProgressCompanies}</h3>
           <div className="flex flex-wrap gap-2">
             {companies.map(company => (
               <span
-                key={`${company.ticker}::${company.name}`}
-                className="inline-flex items-center gap-1 px-3 py-1.5 rounded-full bg-gray-700 text-sm"
+                key={company.key}
+                className="inline-flex items-center gap-1 px-3 py-1.5 rounded-full bg-gray-700 text-sm max-w-full truncate"
               >
-                {company.name} ({company.ticker})
+                {formatCompanyChip(company.name, company.ticker)}
               </span>
             ))}
           </div>
         </div>
       )}
 
-      <div className="rounded-lg border border-gray-700 bg-gray-800/40 p-4">
+      <div className="rounded-lg border border-gray-700 bg-gray-800/40 p-4 w-full min-w-0">
         <ol className="space-y-3">
           {COMPARE_STEPS.map((step, index) => {
             const done = currentIndex > index || progress.status === 'COMPLETED';
@@ -103,7 +125,7 @@ export const CompareProgressPanel: React.FC<CompareProgressPanelProps> = ({
             const label = ui[stepLabelKey(step)];
 
             return (
-              <li key={step} className="flex items-start gap-3">
+              <li key={step} className="flex items-start gap-3 min-w-0">
                 <span
                   className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-xs ${
                     failed
@@ -117,9 +139,9 @@ export const CompareProgressPanel: React.FC<CompareProgressPanelProps> = ({
                 >
                   {failed ? '!' : done ? '✓' : active ? '…' : index + 1}
                 </span>
-                <div>
+                <div className="min-w-0">
                   <div
-                    className={`text-sm ${
+                    className={`text-sm break-words ${
                       active ? 'text-gray-100 font-medium' : done ? 'text-gray-300' : 'text-gray-500'
                     }`}
                   >
@@ -133,7 +155,7 @@ export const CompareProgressPanel: React.FC<CompareProgressPanelProps> = ({
       </div>
 
       {onOpenHistorySidebar && (
-        <p className="text-sm text-purple-300/90">
+        <p className="text-sm text-purple-300/90 break-words">
           {ui.compareHistoryInSidebar}{' '}
           <button
             type="button"
@@ -146,7 +168,7 @@ export const CompareProgressPanel: React.FC<CompareProgressPanelProps> = ({
       )}
 
       {progress.status === 'FAILED' && progress.error && (
-        <div className="rounded-lg border border-red-500/40 bg-red-950/20 px-4 py-3 text-sm text-red-300">
+        <div className="rounded-lg border border-red-500/40 bg-red-950/20 px-4 py-3 text-sm text-red-300 break-words">
           {ui.compareProgressFailed}: {progress.error}
         </div>
       )}
