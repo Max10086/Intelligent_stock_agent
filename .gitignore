@@ -40,6 +40,27 @@ lerna-debug.log*
 # TypeScript
 *.tsbuildinfo
 
+# Accidental tsc emit next to frontend/shared sources (build uses dist/ or server/dist/)
+/types.js
+/types.d.ts
+/types.js.map
+/types.d.ts.map
+/types/*.js
+/types/*.d.ts
+/types/*.js.map
+/types/*.d.ts.map
+/utils/*.js
+/utils/*.d.ts
+/utils/*.js.map
+/utils/*.d.ts.map
+/services/*.js
+/services/*.d.ts
+/services/*.js.map
+/services/*.d.ts.map
+
+# Local scratch
+temp.txt
+
 # Server build output
 server/dist/
 
