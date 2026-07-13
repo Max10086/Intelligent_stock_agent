@@ -37,7 +37,7 @@ import {
 
 export const MAX_COMPARE_ITEMS = Math.max(
   2,
-  Math.min(5, Number(process.env.MAX_COMPARE_ITEMS || '5'))
+  Math.min(10, Number(process.env.MAX_COMPARE_ITEMS || '10'))
 );
 
 const EMPTY_SNAPSHOT = JSON.stringify({ markets: {} });

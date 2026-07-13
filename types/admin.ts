@@ -29,6 +29,8 @@ export interface AdminMetricsResponse {
   };
 }
 
+export type AdminActivationStatus = 'activated' | 'started_incomplete' | 'not_started';
+
 export interface AdminUserRow {
   id: string;
   email: string;
@@ -38,6 +40,7 @@ export interface AdminUserRow {
   isPaid: boolean;
   isAdmin: boolean;
   totalAnalyses: number;
+  activationStatus: AdminActivationStatus;
   lastActiveAt: string | null;
 }
 

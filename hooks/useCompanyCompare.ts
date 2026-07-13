@@ -13,7 +13,7 @@ import type {
 import type { EligibleCompareCompany } from '../utils/compareEligible.ts';
 import { buildCompareBasketKey } from '../utils/compareEligible.ts';
 
-const MAX_COMPARE_ITEMS = 5;
+const MAX_COMPARE_ITEMS = 10;
 const POLL_INTERVAL_MS = 1500;
 const PENDING_RUN_STORAGE_KEY = 'comparePendingRunId';
 

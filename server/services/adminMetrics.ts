@@ -1,4 +1,5 @@
 import { Prisma } from '@prisma/client';
+import type { AdminActivationStatus } from '../../types/admin.js';
 import { prisma, withPrismaRetry } from '../db.js';
 import { isSuperAdminUser } from './adminAccess.js';
 
@@ -40,7 +41,7 @@ export const getAdminMetrics = async (query: AdminMetricsQuery) => {
   return withPrismaRetry(async () => {
     const [
       authSignupRows,
-      totalRegistered,
+      totalRegisteredRows,
       activatedUsers,
       activatedInPeriod,
       paidProfiles,
@@ -61,7 +62,11 @@ export const getAdminMetrics = async (query: AdminMetricsQuery) => {
           AND created_at >= ${from}
           AND created_at <= ${to}
       `,
-      prisma.user.count(),
+      prisma.$queryRaw<Array<{ count: number }>>`
+        SELECT COUNT(*)::int AS count
+        FROM auth.users
+        WHERE deleted_at IS NULL
+      `,
       prisma.user.count({ where: { firstAnalysisAt: { not: null } } }),
       prisma.user.count({
         where: { firstAnalysisAt: { gte: from, lte: to } },
@@ -134,6 +139,7 @@ export const getAdminMetrics = async (query: AdminMetricsQuery) => {
     const totalPaidUsers = paidProfiles.filter(
       user => isPaidUser(user) && !isSuperAdminUser(user)
     ).length;
+    const totalRegistered = totalRegisteredRows[0]?.count ?? 0;
     const signups = authSignupRows[0]?.count ?? 0;
     const hitPaywall = hitPaywallRows[0]?.count ?? 0;
     const wau = wauRows[0]?.count ?? 0;
@@ -193,40 +199,83 @@ export interface AdminUsersQuery {
   limit?: number;
 }
 
+const ANALYSIS_START_EVENT_TYPES = [
+  'analysis_start',
+  'candidate_analysis_start',
+  'follow_up_start',
+  'batch_start',
+] as const;
+
+export const resolveActivationStatus = (
+  totalAnalyses: number,
+  hasStartedAnalysis: boolean
+): AdminActivationStatus => {
+  if (totalAnalyses > 0) return 'activated';
+  if (hasStartedAnalysis) return 'started_incomplete';
+  return 'not_started';
+};
+
 export const listAdminUsers = async (query: AdminUsersQuery = {}) => {
   const skip = Math.max(0, query.skip ?? 0);
   const limit = Math.min(100, Math.max(1, query.limit ?? 50));
 
   return withPrismaRetry(async () => {
-    const [total, users] = await Promise.all([
-      prisma.user.count(),
-      prisma.user.findMany({
-        skip,
-        take: limit,
-        select: {
-          id: true,
-          email: true,
-          createdAt: true,
-          firstAnalysisAt: true,
-          paidAt: true,
-          isPaid: true,
-          subscriptionStatus: true,
-          paypalSubscriptionId: true,
-          isAdmin: true,
-        },
-        orderBy: { createdAt: 'desc' },
-      }),
+    const [totalRows, authUserRows] = await Promise.all([
+      prisma.$queryRaw<Array<{ count: number }>>`
+        SELECT COUNT(*)::int AS count
+        FROM auth.users
+        WHERE deleted_at IS NULL
+      `,
+      prisma.$queryRaw<
+        Array<{
+          id: string;
+          email: string;
+          created_at: Date;
+          firstAnalysisAt: Date | null;
+          paidAt: Date | null;
+          isPaid: boolean | null;
+          subscriptionStatus: string | null;
+          paypalSubscriptionId: string | null;
+          isAdmin: boolean | null;
+        }>
+      >`
+        SELECT
+          au.id::text AS id,
+          au.email,
+          au.created_at,
+          u."firstAnalysisAt",
+          u."paidAt",
+          u."isPaid",
+          u."subscriptionStatus",
+          u."paypalSubscriptionId",
+          u."isAdmin"
+        FROM auth.users au
+        LEFT JOIN "User" u ON u.id = au.id::text
+        WHERE au.deleted_at IS NULL
+        ORDER BY au.created_at DESC
+        LIMIT ${limit}
+        OFFSET ${skip}
+      `,
     ]);
 
-    const userIds = users.map(user => user.id);
+    const total = totalRows[0]?.count ?? 0;
+    const userIds = authUserRows.map(user => user.id);
     if (userIds.length === 0) {
       return { total, skip, limit, users: [] };
     }
 
-    const [analysisCounts, lastActiveRows] = await Promise.all([
+    const [analysisCounts, startedAnalysisRows, lastActiveRows] = await Promise.all([
       prisma.companyAnalysisUsage.groupBy({
         by: ['userId'],
         where: { userId: { in: userIds } },
+        _count: { _all: true },
+      }),
+      prisma.userEvent.groupBy({
+        by: ['userId'],
+        where: {
+          userId: { in: userIds },
+          eventType: { in: [...ANALYSIS_START_EVENT_TYPES] },
+        },
         _count: { _all: true },
       }),
       prisma.$queryRaw<Array<{ userId: string; lastActive: Date | null }>>`
@@ -240,6 +289,7 @@ export const listAdminUsers = async (query: AdminUsersQuery = {}) => {
     const analysisMap = new Map(
       analysisCounts.map(row => [row.userId, row._count._all])
     );
+    const startedAnalysisSet = new Set(startedAnalysisRows.map(row => row.userId));
     const lastActiveMap = new Map(
       lastActiveRows.map(row => [row.userId, row.lastActive?.toISOString() || null])
     );
@@ -248,17 +298,33 @@ export const listAdminUsers = async (query: AdminUsersQuery = {}) => {
       total,
       skip,
       limit,
-      users: users.map(user => ({
-        id: user.id,
-        email: user.email,
-        createdAt: user.createdAt.toISOString(),
-        firstAnalysisAt: user.firstAnalysisAt?.toISOString() || null,
-        paidAt: user.paidAt?.toISOString() || null,
-        isPaid: isPaidUser(user),
-        isAdmin: isSuperAdminUser(user),
-        totalAnalyses: analysisMap.get(user.id) ?? 0,
-        lastActiveAt: lastActiveMap.get(user.id) || null,
-      })),
+      users: authUserRows.map(user => {
+        const paidProfile = {
+          isPaid: user.isPaid ?? false,
+          subscriptionStatus: user.subscriptionStatus,
+          paypalSubscriptionId: user.paypalSubscriptionId,
+          isAdmin: user.isAdmin ?? false,
+          email: user.email,
+        };
+
+        const totalAnalyses = analysisMap.get(user.id) ?? 0;
+
+        return {
+          id: user.id,
+          email: user.email,
+          createdAt: user.created_at.toISOString(),
+          firstAnalysisAt: user.firstAnalysisAt?.toISOString() || null,
+          paidAt: user.paidAt?.toISOString() || null,
+          isPaid: isPaidUser(paidProfile),
+          isAdmin: isSuperAdminUser(paidProfile),
+          totalAnalyses,
+          activationStatus: resolveActivationStatus(
+            totalAnalyses,
+            startedAnalysisSet.has(user.id)
+          ),
+          lastActiveAt: lastActiveMap.get(user.id) || null,
+        };
+      }),
     };
   }, 'admin.users', 2);
 };

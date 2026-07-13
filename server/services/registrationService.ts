@@ -1,6 +1,7 @@
 import { prisma, withPrismaRetry } from '../db.js';
 import { getSupabaseAdmin } from '../lib/supabaseAdmin.js';
 import { normalizeEmail } from '../../utils/authValidation.js';
+import { ensureUserProfile } from './userService.js';
 import {
   generateVerificationCode,
   getVerificationCodeTtlMs,
@@ -113,8 +114,12 @@ export const completeEmailRegistration = async (
   const supabase = getSupabaseAdmin();
   const registrationStatus = await getEmailRegistrationStatus(normalizedEmail);
 
+  const syncAppProfile = async (userId: string) => {
+    await ensureUserProfile({ id: userId, email: normalizedEmail });
+  };
+
   if (registrationStatus.status === 'available') {
-    const { error } = await supabase.auth.admin.createUser({
+    const { data, error } = await supabase.auth.admin.createUser({
       email: normalizedEmail,
       password,
       email_confirm: true,
@@ -130,10 +135,15 @@ export const completeEmailRegistration = async (
             email_confirm: true,
           });
           if (updateError) throw new Error(updateError.message || 'Failed to update user');
+          await syncAppProfile(retryStatus.userId);
           return 'updated';
         }
       }
       throw new Error(message);
+    }
+
+    if (data.user?.id) {
+      await syncAppProfile(data.user.id);
     }
 
     return 'created';
@@ -146,6 +156,8 @@ export const completeEmailRegistration = async (
   if (error) {
     throw new Error(error.message || 'Failed to update user');
   }
+
+  await syncAppProfile(registrationStatus.userId!);
 
   return 'updated';
 };

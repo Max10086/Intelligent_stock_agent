@@ -8,7 +8,7 @@ import {
   buildTickerHistoryGroups,
   truncateConclusion,
 } from '../utils/analysisTimeline.ts';
-import { formatCompareSessionLabel } from '../utils/compareSessionLabel.ts';
+import { formatCompareSessionDate, formatCompareSessionLabel } from '../utils/compareSessionLabel.ts';
 import {
   compareSessionMatchesSearch,
   filterTickerHistoryGroups,
@@ -297,6 +297,7 @@ export const HistorySidebar: React.FC<HistorySidebarProps> = ({
       String(session.runCount)
     );
     const sessionLabel = formatCompareSessionLabel(session, currentLanguage);
+    const sessionDate = formatCompareSessionDate(session, currentLanguage);
 
     return (
       <div
@@ -308,7 +309,7 @@ export const HistorySidebar: React.FC<HistorySidebarProps> = ({
         <div className="min-w-0">
           <p className="font-semibold text-purple-200 text-sm leading-snug">{sessionLabel}</p>
           <p className="text-xs text-gray-500 mt-1">
-            {runCountLabel} · {session.language.toUpperCase()}
+            {sessionDate} · {runCountLabel} · {session.language.toUpperCase()}
           </p>
         </div>
         {latest && (

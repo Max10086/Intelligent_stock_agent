@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Language } from '../types.ts';
 import type {
+  AdminActivationStatus,
   AdminFeedbackResponse,
   AdminMetricsResponse,
   AdminUsersResponse,
@@ -14,6 +15,8 @@ interface AdminDashboardProps {
 }
 
 type PeriodPreset = 7 | 30 | 90;
+
+const ADMIN_USERS_POLL_MS = 30_000;
 
 const formatDateTime = (value: string | null, language: Language): string => {
   if (!value) return '—';
@@ -32,6 +35,26 @@ const periodLabel = (days: PeriodPreset, language: Language): string => {
   if (days === 7) return ui.adminPeriod7d;
   if (days === 30) return ui.adminPeriod30d;
   return ui.adminPeriod90d;
+};
+
+const activationStatusLabel = (
+  status: AdminActivationStatus,
+  language: Language
+): string => {
+  const ui = getUIText(language);
+  if (status === 'activated') return ui.adminActivationActivated;
+  if (status === 'started_incomplete') return ui.adminActivationStarted;
+  return ui.adminActivationNotStarted;
+};
+
+const activationStatusClass = (status: AdminActivationStatus): string => {
+  if (status === 'activated') {
+    return 'border-emerald-700/50 bg-emerald-950/40 text-emerald-300';
+  }
+  if (status === 'started_incomplete') {
+    return 'border-amber-700/50 bg-amber-950/40 text-amber-300';
+  }
+  return 'border-gray-700 bg-gray-900 text-gray-400';
 };
 
 const KpiCard: React.FC<{ label: string; value: string | number; hint?: string; loading?: boolean }> = ({
@@ -105,6 +128,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ language, onBack
   const [metricsLoading, setMetricsLoading] = useState(true);
   const [usersLoading, setUsersLoading] = useState(true);
   const [feedbackLoading, setFeedbackLoading] = useState(true);
+  const [usersRefreshing, setUsersRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const initialLoadDoneRef = useRef(false);
 
@@ -137,8 +161,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ language, onBack
     }
   }, [queryRange.from, queryRange.to, ui.adminError]);
 
-  const loadUsers = useCallback(async () => {
-    setUsersLoading(true);
+  const loadUsers = useCallback(async (options?: { silent?: boolean }) => {
+    const silent = options?.silent ?? false;
+    if (!silent) {
+      setUsersLoading(true);
+    } else {
+      setUsersRefreshing(true);
+    }
     try {
       const response = await apiFetch('/api/admin/users?limit=50');
       if (!response.ok) {
@@ -146,14 +175,23 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ language, onBack
       }
       setUsers((await response.json()) as AdminUsersResponse);
     } catch (loadError) {
-      setError(prev => prev ?? (loadError instanceof Error ? loadError.message : ui.adminError));
+      if (!silent) {
+        setError(prev => prev ?? (loadError instanceof Error ? loadError.message : ui.adminError));
+      }
     } finally {
-      setUsersLoading(false);
+      if (!silent) {
+        setUsersLoading(false);
+      } else {
+        setUsersRefreshing(false);
+      }
     }
   }, [ui.adminError]);
 
-  const loadFeedback = useCallback(async () => {
-    setFeedbackLoading(true);
+  const loadFeedback = useCallback(async (options?: { silent?: boolean }) => {
+    const silent = options?.silent ?? false;
+    if (!silent) {
+      setFeedbackLoading(true);
+    }
     try {
       const response = await apiFetch('/api/admin/feedback?limit=30');
       if (!response.ok) {
@@ -161,9 +199,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ language, onBack
       }
       setFeedback((await response.json()) as AdminFeedbackResponse);
     } catch (loadError) {
-      setError(prev => prev ?? (loadError instanceof Error ? loadError.message : ui.adminError));
+      if (!silent) {
+        setError(prev => prev ?? (loadError instanceof Error ? loadError.message : ui.adminError));
+      }
     } finally {
-      setFeedbackLoading(false);
+      if (!silent) {
+        setFeedbackLoading(false);
+      }
     }
   }, [ui.adminError]);
 
@@ -179,6 +221,27 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ language, onBack
     }
     void loadMetrics();
   }, [loadAllData, loadMetrics]);
+
+  useEffect(() => {
+    const refreshLiveSections = () => {
+      void loadUsers({ silent: true });
+      void loadFeedback({ silent: true });
+    };
+
+    const intervalId = window.setInterval(refreshLiveSections, ADMIN_USERS_POLL_MS);
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        refreshLiveSections();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [loadFeedback, loadUsers]);
 
   const funnelSteps = metrics
     ? [
@@ -362,7 +425,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ language, onBack
         <div className="rounded-xl border border-gray-700 bg-gray-900/70 p-4">
           <div className="mb-4 flex flex-wrap items-baseline justify-between gap-2">
             <h3 className="text-sm font-medium text-gray-200">{ui.adminUsersTitle}</h3>
-            <p className="text-xs text-gray-500">{ui.adminUsersAllTime}</p>
+            <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
+              <span>{ui.adminUsersAllTime}</span>
+              <span>·</span>
+              <span>{ui.adminUsersAutoRefresh}</span>
+              {usersRefreshing && (
+                <>
+                  <span>·</span>
+                  <span className="flex items-center gap-1 text-blue-300">
+                    <span className="inline-block h-2.5 w-2.5 animate-spin rounded-full border border-blue-300 border-t-transparent" />
+                    {ui.adminUsersRefreshing}
+                  </span>
+                </>
+              )}
+            </div>
           </div>
           {usersLoading && !users ? (
             <SectionSkeleton rows={6} />
@@ -374,6 +450,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ language, onBack
                     <th className="px-3 py-2">{ui.adminColEmail}</th>
                     <th className="px-3 py-2">{ui.adminColRegistered}</th>
                     <th className="px-3 py-2">{ui.adminColAnalyses}</th>
+                    <th className="px-3 py-2">{ui.adminColActivation}</th>
                     <th className="px-3 py-2">{ui.adminColPaid}</th>
                     <th className="px-3 py-2">{ui.adminColLastActive}</th>
                   </tr>
@@ -389,6 +466,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ language, onBack
                       </td>
                       <td className="px-3 py-2">{formatDateTime(user.createdAt, language)}</td>
                       <td className="px-3 py-2">{user.totalAnalyses}</td>
+                      <td className="px-3 py-2">
+                        <span
+                          className={`inline-flex rounded-full border px-2 py-0.5 text-xs ${activationStatusClass(user.activationStatus)}`}
+                        >
+                          {activationStatusLabel(user.activationStatus, language)}
+                        </span>
+                      </td>
                       <td className="px-3 py-2">{user.isPaid ? '✓' : '—'}</td>
                       <td className="px-3 py-2">{formatDateTime(user.lastActiveAt, language)}</td>
                     </tr>
