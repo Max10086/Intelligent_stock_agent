@@ -6,7 +6,7 @@ import type {
   EquityMarket,
 } from '../../types/compare.js';
 import { prisma, withPrismaRetry } from '../db.js';
-import { isCompanyAnalysisComplete } from '../../utils/analysisComplete.js';
+import { isCompanyEligibleForCompare } from '../../utils/compareEligible.js';
 import { getEquityMarket } from '../../utils/companyDiscovery.js';
 import {
   buildComparisonItemId,
@@ -111,7 +111,7 @@ export async function resolveComparisonItems(
       throw new Error(`Company ${input.companyId} not found in report ${input.reportId}`);
     }
 
-    if (!isCompanyAnalysisComplete(match.company)) {
+    if (!isCompanyEligibleForCompare(match.company)) {
       throw new Error(
         `Company ${match.company.profile.name} (${match.company.profile.ticker}) analysis is incomplete`
       );
@@ -191,7 +191,7 @@ export async function findLatestCompleteReportForTicker(
       report.candidateCompanies || []
     )) {
       if (company.profile.ticker.toUpperCase() !== upper) continue;
-      if (!isCompanyAnalysisComplete(company)) continue;
+      if (!isCompanyEligibleForCompare(company)) continue;
       return { reportId: report.id, companyId: company.id, role };
     }
   }

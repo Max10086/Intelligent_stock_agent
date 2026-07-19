@@ -14,10 +14,13 @@ import { Header } from './components/Header.tsx';
 import { ComparePage } from './components/ComparePage.tsx';
 import { HistorySidebar } from './components/HistorySidebar.tsx';
 import { AdminDashboard } from './components/AdminDashboard.tsx';
+import { GainerLeaderboardPage } from './components/GainerLeaderboardPage.tsx';
+import { AnalysisCatalogPage } from './components/AnalysisCatalogPage.tsx';
+import { invalidateAnalysisCatalogCache } from './hooks/useAnalysisCatalog.ts';
 import { FeedbackModal } from './components/FeedbackModal.tsx';
 import { useCompanyCompare } from './hooks/useCompanyCompare.ts';
 import { AnalysisStepTimeline } from './components/AnalysisStepTimeline.tsx';
-import { getUIText, BRAND, FEATURE_BATCH_QUEUE } from './constants.ts';
+import { getUIText, BRAND, FEATURE_BATCH_QUEUE, FEATURE_GAINER_LEADERBOARD } from './constants.ts';
 import { useAuth } from './hooks/useAuth.ts';
 import { LoginPage } from './components/LoginPage.tsx';
 import { UsageBanner } from './components/UsageBanner.tsx';
@@ -48,7 +51,7 @@ const persistStepTimelinePreference = (visible: boolean) => {
   }
 };
 
-type ViewMode = 'single' | 'batch' | 'compare';
+type ViewMode = 'single' | 'batch' | 'compare' | 'gainers' | 'catalog';
 
 const App: React.FC = () => {
   const [language, setLanguage] = useState<Language>(() => readStoredUiLanguage() ?? 'en');
@@ -332,6 +335,14 @@ const App: React.FC = () => {
   const isLoadingReportDetails =
     Boolean(loadingReportId) && loadingReportId === analysisState.id;
 
+  const catalogUserId = auth.user?.id ?? auth.session?.user?.id ?? null;
+
+  useEffect(() => {
+    if (saveStatus === 'success') {
+      invalidateAnalysisCatalogCache(catalogUserId);
+    }
+  }, [saveStatus, catalogUserId]);
+
   const isBatchJobInProgress =
     batchJobStatus?.overallStatus === 'PENDING' || batchJobStatus?.overallStatus === 'PROCESSING';
   const showBatchStatus =
@@ -346,6 +357,8 @@ const App: React.FC = () => {
   const showModelSettingsPanel =
     currentView !== 'batch' &&
     currentView !== 'compare' &&
+    currentView !== 'gainers' &&
+    currentView !== 'catalog' &&
     !showBatchStatus &&
     !isViewingCompanyReport;
 
@@ -596,6 +609,14 @@ const App: React.FC = () => {
           trackEvent('history_open');
         }}
         onOpenCompare={() => setCurrentView('compare')}
+        onOpenGainers={
+          FEATURE_GAINER_LEADERBOARD && isAdmin
+            ? () => setCurrentView('gainers')
+            : undefined
+        }
+        onOpenCatalog={
+          FEATURE_BATCH_QUEUE ? () => setCurrentView('catalog') : undefined
+        }
         userEmail={auth.user?.email ?? auth.session?.user?.email ?? null}
         onSignOut={() => void auth.signOut()}
         showUpgradeButton={!isPaidMember}
@@ -667,36 +688,68 @@ const App: React.FC = () => {
                 isAdmin={isAdmin}
               />
             )}
-            {FEATURE_BATCH_QUEUE && currentView === 'batch' ? (
-          <BatchQueuePage
-            language={language}
-            queueStatus={queueStatus}
-            queueFetchError={queueFetchError}
-            onRefreshQueue={() => void fetchQueueStatus()}
-            submitBatchJob={submitBatchJob}
-            retryFailedJob={retryFailedJob}
-            runtimeModelConfig={runtimeModelConfig}
-            onConfigApplied={applyRuntimeModelConfig}
-            isAdmin={isAdmin}
-            onLoadReport={({ id, result }) => {
-              void loadFromHistory(id, result)
-                .then(() => {
-                  clearBatchJob();
-                  setCurrentView('single');
-                  window.setTimeout(() => void refreshHistory(), 500);
-                })
-                .catch(error => {
-                  console.error('Failed to load batch report:', error);
-                  alert(
-                    language === 'cn'
-                      ? `加载报告失败：${error instanceof Error ? error.message : '未知错误'}`
-                      : `Failed to load report: ${error instanceof Error ? error.message : 'Unknown error'}`
-                  );
-                });
-            }}
-            onRefreshHistory={() => void refreshHistory()}
-          />
-        ) : currentView === 'compare' ? (
+            {FEATURE_BATCH_QUEUE && currentView === 'catalog' ? (
+              <AnalysisCatalogPage
+                language={language}
+                userId={catalogUserId}
+                onLoadReport={({ id, result }) => {
+                  void loadFromHistory(id, result)
+                    .then(() => {
+                      clearBatchJob();
+                      setCurrentView('single');
+                      window.setTimeout(() => void refreshHistory(), 500);
+                    })
+                    .catch(error => {
+                      console.error('Failed to load catalog report:', error);
+                      alert(
+                        language === 'cn'
+                          ? `加载报告失败：${error instanceof Error ? error.message : '未知错误'}`
+                          : `Failed to load report: ${error instanceof Error ? error.message : 'Unknown error'}`
+                      );
+                    });
+                }}
+              />
+            ) : FEATURE_GAINER_LEADERBOARD && isAdmin && currentView === 'gainers' ? (
+              <GainerLeaderboardPage
+                language={language}
+                onAnalyzeStarted={() => {
+                  setCurrentView('batch');
+                  void fetchQueueStatus();
+                }}
+              />
+            ) : FEATURE_BATCH_QUEUE && currentView === 'batch' ? (
+              <BatchQueuePage
+                language={language}
+                queueStatus={queueStatus}
+                queueFetchError={queueFetchError}
+                onRefreshQueue={() => void fetchQueueStatus()}
+                submitBatchJob={submitBatchJob}
+                retryFailedJob={retryFailedJob}
+                runtimeModelConfig={runtimeModelConfig}
+                onConfigApplied={applyRuntimeModelConfig}
+                isAdmin={isAdmin}
+                onLoadReport={({ id, result }) => {
+                  void loadFromHistory(id, result)
+                    .then(() => {
+                      clearBatchJob();
+                      setCurrentView('single');
+                      window.setTimeout(() => void refreshHistory(), 500);
+                    })
+                    .catch(error => {
+                      console.error('Failed to load batch report:', error);
+                      alert(
+                        language === 'cn'
+                          ? `加载报告失败：${error instanceof Error ? error.message : '未知错误'}`
+                          : `Failed to load report: ${error instanceof Error ? error.message : 'Unknown error'}`
+                      );
+                    });
+                }}
+                onRefreshHistory={() => {
+                  invalidateAnalysisCatalogCache(catalogUserId);
+                  void refreshHistory();
+                }}
+              />
+            ) : currentView === 'compare' ? (
           <ComparePage
             language={language}
             history={history}

@@ -12,8 +12,10 @@ import {
 import { getRuntimeModelConfig } from '../aiModelConfig.js';
 import { ModelClient } from './modelClient.js';
 import { cleanupBrokenNumericFormatting, mergeBrokenEvidenceFragments } from '../../utils/textNormalize.js';
-import { buildFinalConclusionPrompt, buildFinalConclusionStrictRetrySuffix } from '../../utils/finalConclusionPrompt.js';
+import { buildFinalConclusionPrompt, buildFinalConclusionStrictRetrySuffix, buildFollowUpFinalConclusionStrictRetrySuffix, FINAL_CONCLUSION_RESPONSE_SCHEMA } from '../../utils/finalConclusionPrompt.js';
+import { getFinalConclusionQualityIssues, hasUsableFinalConclusion } from '../../utils/analysisComplete.js';
 import { normalizeInvestmentConclusion } from '../../utils/investmentConclusionNormalize.js';
+import { normalizeFinalConclusion } from '../../utils/finalConclusionNormalize.js';
 import { parseModelJsonResponse } from '../../utils/modelJson.js';
 import {
   hasUsableInvestmentConclusion,
@@ -28,6 +30,11 @@ import { generateQuestionsInBatches } from '../../utils/questionGenerationBatche
 import { buildRecencyGuidance } from '../../utils/recencyGuidance.js';
 import { buildAnswerQuestionPrompt, buildVerifiedMarketContext } from '../../utils/marketSnapshot.js';
 import {
+  applyStrategicEventAnswerRetries,
+  buildAnswerPromptForQuestion,
+  resolveStrategicEventSearchQueries,
+} from '../../utils/strategicEventsAnswer.js';
+import {
   buildQuickTakeIdentityRule,
   buildWrongCompanyRetryAppendix,
   detectWrongCompanyMix,
@@ -41,7 +48,13 @@ import {
   EXPECTATION_GAP_QUESTION_COUNT,
   getCoreQuestionCount,
 } from '../../utils/expectationGapPrompt.js';
-import { mergeCoreAndExpectationGapQuestions } from '../../utils/mergeQuestionSets.js';
+import { mergeAllResearchQuestions } from '../../utils/mergeQuestionSets.js';
+import { buildStrategicEventsQuestions } from '../../utils/strategicEventsPrompt.js';
+import {
+  buildMaterialEventsDigestForFinalConclusion,
+  extractMaterialEventsFromQna,
+  type MaterialEvent,
+} from '../../utils/materialEventsExtract.js';
 import { isUnusableSearchAnswer } from '../../utils/qnaAnswerQuality.js';
 // FIX: 删除了重复引用，保留这一行正确的
 import { searchTicker, getFinancialData } from '../../services/finance.js';
@@ -108,49 +121,6 @@ const normalizeEvidenceList = (value: any): string[] => {
     return single ? [single] : [];
   }
   return [];
-};
-
-const normalizeFinalBulletPoint = (point: any) => {
-  if (typeof point === 'string') {
-    return { argument: point.trim(), evidence: [] as string[] };
-  }
-  return {
-    argument: cleanupBrokenNumericFormatting(getFirstString(point, ['argument', 'claim', 'point', 'thesis', 'summary'])),
-    evidence: normalizeEvidenceList(
-      point?.evidence ??
-        point?.supporting_evidence ??
-        point?.supportingEvidence ??
-        point?.data_points ??
-        point?.dataPoints ??
-        point?.facts ??
-        point?.proof
-    ),
-  };
-};
-
-const normalizeFinalConclusion = (raw: any): FinalConclusion => {
-  const bulletRaw =
-    raw?.bullet_points ??
-    raw?.bulletPoints ??
-    raw?.key_points ??
-    raw?.keyPoints ??
-    raw?.points ??
-    raw?.arguments ??
-    [];
-  const bulletPoints = Array.isArray(bulletRaw)
-    ? bulletRaw.map(normalizeFinalBulletPoint)
-    : normalizeEvidenceList(bulletRaw).map(text => ({ argument: text, evidence: [] as string[] }));
-
-  return {
-    overall_conclusion: cleanupBrokenNumericFormatting(getFirstString(raw, [
-      'overall_conclusion',
-      'overallConclusion',
-      'conclusion',
-      'recommendation',
-      'verdict',
-    ])),
-    bullet_points: bulletPoints.filter(point => point.argument || point.evidence.length > 0),
-  };
 };
 
 export class AnalysisService {
@@ -353,7 +323,56 @@ export class AnalysisService {
     });
 
     const gapQuestions = await this.generateExpectationGapQuestions(company, lang);
-    return mergeCoreAndExpectationGapQuestions(standardQuestions, gapQuestions, questionCount);
+    const strategicQuestions = buildStrategicEventsQuestions(company, lang);
+    return mergeAllResearchQuestions(standardQuestions, strategicQuestions, gapQuestions, questionCount);
+  }
+
+  private async extractMaterialEvents(
+    company: CompanyProfile,
+    qna: QnAResult[],
+    lang: Language,
+    step: 'extract_material_events' | 'follow_up_extract_material_events' = 'extract_material_events'
+  ): Promise<MaterialEvent[]> {
+    return extractMaterialEventsFromQna({
+      companyName: company.name,
+      lang,
+      qna: qna.map(item => ({
+        question: item.question,
+        answer: item.answer,
+        sources: item.sources,
+      })),
+      callModel: async prompt => {
+        const response = await this.modelClient.generateContent({
+          step,
+          contents: { role: 'user', parts: [{ text: prompt }] },
+          config: {
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                events: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      date: { type: Type.STRING },
+                      headline: { type: Type.STRING },
+                      partners: { type: Type.ARRAY, items: { type: Type.STRING } },
+                      category: { type: Type.STRING },
+                      status: { type: Type.STRING },
+                      investment_relevance: { type: Type.STRING },
+                    },
+                    required: ['headline', 'category', 'status', 'investment_relevance'],
+                  },
+                },
+              },
+              required: ['events'],
+            },
+          },
+        });
+        return response.text || '{}';
+      },
+    });
   }
 
   async answerQuestion(
@@ -370,13 +389,14 @@ export class AnalysisService {
       await onProgress(`Searching web for: ${question.substring(0, 60)}...`);
     }
     
-    const basePrompt = buildAnswerQuestionPrompt(
+    const basePrompt = buildAnswerPromptForQuestion({
       question,
-      company,
+      profile: company,
       outputLanguage,
-      buildRecencyGuidance(now, lang),
-      lang
-    );
+      recencyGuidance: buildRecencyGuidance(now, lang),
+      lang,
+    });
+    const searchQueries = resolveStrategicEventSearchQueries(question, company, lang);
 
     const callSearch = async (prompt: string) => {
       const response = await this.modelClient.generateContent({
@@ -386,6 +406,7 @@ export class AnalysisService {
           tools: [{ googleSearch: {} }],
         },
         requireGoogleSearch: true,
+        searchQueries,
       });
       const sources: GroundingSource[] =
         response.candidates?.[0]?.groundingMetadata?.groundingChunks
@@ -403,6 +424,15 @@ export class AnalysisService {
     if (isUnusableSearchAnswer(answer)) {
       throw new Error(`Search returned no usable evidence for question: ${question.substring(0, 80)}`);
     }
+
+    ({ answer, sources } = await applyStrategicEventAnswerRetries({
+      question,
+      company,
+      lang,
+      basePrompt,
+      initial: { answer, sources },
+      callSearch,
+    }));
 
     const mixCheck = detectWrongCompanyMix(answer, company);
     if (mixCheck.mixed) {
@@ -424,18 +454,32 @@ export class AnalysisService {
   async synthesizeConclusion(
     company: CompanyProfile,
     qna: QnAResult[],
-    lang: Language
+    lang: Language,
+    materialEvents?: MaterialEvent[]
   ): Promise<InvestmentConclusion> {
     const outputLanguage = lang === 'cn' ? 'Simplified Chinese' : 'English';
     const now = new Date();
     const marketContext = buildVerifiedMarketContext(company, lang);
-    const conclusionSectionSchema = {
-      type: Type.OBJECT,
-      properties: {
-        summary: { type: Type.STRING },
-        evidence: { type: Type.ARRAY, items: { type: Type.STRING } },
-      },
-      required: ['summary', 'evidence'],
+    const buildSectionSchema = (sectionKey: ThesisSectionKey) => {
+      if (sectionKey === 'ExpectationGap') {
+        return {
+          type: Type.OBJECT,
+          properties: {
+            gap_assessment: { type: Type.STRING },
+            summary: { type: Type.STRING },
+            evidence: { type: Type.ARRAY, items: { type: Type.STRING } },
+          },
+          required: ['gap_assessment', 'summary', 'evidence'],
+        };
+      }
+      return {
+        type: Type.OBJECT,
+        properties: {
+          summary: { type: Type.STRING },
+          evidence: { type: Type.ARRAY, items: { type: Type.STRING } },
+        },
+        required: ['summary', 'evidence'],
+      };
     };
 
     const qnaPayload = qna.map(item => ({
@@ -444,12 +488,17 @@ export class AnalysisService {
       sources: item.sources,
     }));
 
+    const events =
+      materialEvents ?? (await this.extractMaterialEvents(company, qna, lang, 'extract_material_events'));
+
     return synthesizeInvestmentConclusionBySections({
       companyName: company.name,
       outputLanguage,
       recencyGuidance: buildRecencyGuidance(now, lang),
       qna: qnaPayload,
       marketContext,
+      materialEvents: events,
+      lang,
       callSection: async (sectionKey: ThesisSectionKey, prompt: string) => {
         const response = await this.modelClient.generateContent({
           step: 'synthesize_conclusion_section',
@@ -459,7 +508,7 @@ export class AnalysisService {
             responseSchema: {
               type: Type.OBJECT,
               properties: {
-                [sectionKey]: conclusionSectionSchema,
+                [sectionKey]: buildSectionSchema(sectionKey),
               },
               required: [sectionKey],
             },
@@ -471,68 +520,53 @@ export class AnalysisService {
     });
   }
 
-  private hasUsableFinalConclusion(finalConclusion: FinalConclusion | null | undefined): boolean {
-    if (!finalConclusion) return false;
-    return Boolean(finalConclusion.overall_conclusion) ||
-      (Array.isArray(finalConclusion.bullet_points) && finalConclusion.bullet_points.length > 0);
-  }
-
   async generateFinalConclusion(
     company: CompanyProfile,
     qna: QnAResult[],
     conclusion: InvestmentConclusion,
-    lang: Language
+    lang: Language,
+    materialEvents?: MaterialEvent[]
   ): Promise<FinalConclusion> {
     const outputLanguage = lang === 'cn' ? 'Simplified Chinese' : 'English';
     const now = new Date();
     const marketContext = buildVerifiedMarketContext(company, lang);
+    const events =
+      materialEvents ?? (await this.extractMaterialEvents(company, qna, lang, 'extract_material_events'));
+    const materialEventsDigest = buildMaterialEventsDigestForFinalConclusion(events, lang);
 
     const finalConclusionSchema = {
-      type: Type.OBJECT,
+      ...FINAL_CONCLUSION_RESPONSE_SCHEMA,
       properties: {
+        ...FINAL_CONCLUSION_RESPONSE_SCHEMA.properties,
         overall_conclusion: {
           type: Type.STRING,
-          description: `Rating plus 3-5 sentence executive summary for ${company.name}.`,
-        },
-        bullet_points: {
-          type: Type.ARRAY,
-          items: {
-            type: Type.OBJECT,
-            properties: {
-              argument: {
-                type: Type.STRING,
-                description: 'A single, key investment argument (pro or con).',
-              },
-              evidence: {
-                type: Type.ARRAY,
-                items: { type: Type.STRING },
-                description: '2-3 specific data points supporting the argument.',
-              },
-            },
-            required: ['argument', 'evidence'],
-          },
+          description: `Clean sell-side executive summary prose for ${company.name}. No section headers.`,
         },
       },
-      required: ['overall_conclusion', 'bullet_points'],
     };
 
-    const buildPrompt = (strict: boolean) => {
+    const qualityOptions = {
+      gapAssessment: conclusion.ExpectationGap?.gap_assessment ?? null,
+    };
+
+    const buildPrompt = (strict: boolean, qualityIssues: string[] = []) => {
       const base = buildFinalConclusionPrompt(
         company.name,
         outputLanguage,
         buildRecencyGuidance(now, lang),
         conclusion,
         qna.map(item => ({ question: item.question, answer: item.answer, sources: item.sources })),
-        marketContext
+        marketContext,
+        materialEventsDigest
       );
       if (!strict) return base;
-      return `${base}\n\n${buildFinalConclusionStrictRetrySuffix()}`;
+      return `${base}\n\n${buildFinalConclusionStrictRetrySuffix(qualityIssues)}`;
     };
 
-    const callModel = async (strict: boolean) => {
+    const callModel = async (strict: boolean, qualityIssues: string[] = []) => {
       const response = await this.modelClient.generateContent({
         step: 'final_conclusion',
-        contents: { role: 'user', parts: [{ text: buildPrompt(strict) }] },
+        contents: { role: 'user', parts: [{ text: buildPrompt(strict, qualityIssues) }] },
         config: {
           responseMimeType: 'application/json',
           responseSchema: finalConclusionSchema,
@@ -542,10 +576,28 @@ export class AnalysisService {
     };
 
     let finalConclusion = await callModel(false);
-    if (!this.hasUsableFinalConclusion(finalConclusion)) {
-      finalConclusion = await callModel(true);
+    let qualityIssues = getFinalConclusionQualityIssues(finalConclusion, qualityOptions);
+    if (qualityIssues.length > 0) {
+      console.warn(
+        `[finalConclusion] Quality gate failed for ${company.ticker} (attempt 1):`,
+        qualityIssues.join('; ')
+      );
+      finalConclusion = await callModel(true, qualityIssues);
+      qualityIssues = getFinalConclusionQualityIssues(finalConclusion, qualityOptions);
     }
-    if (!this.hasUsableFinalConclusion(finalConclusion)) {
+    if (qualityIssues.length > 0) {
+      console.warn(
+        `[finalConclusion] Quality gate failed for ${company.ticker} (attempt 2):`,
+        qualityIssues.join('; ')
+      );
+      finalConclusion = await callModel(true, qualityIssues);
+      qualityIssues = getFinalConclusionQualityIssues(finalConclusion, qualityOptions);
+    }
+    if (!hasUsableFinalConclusion(finalConclusion, qualityOptions)) {
+      console.error(
+        `[finalConclusion] Giving up for ${company.ticker} after 3 attempts:`,
+        qualityIssues.join('; ')
+      );
       throw new Error(`Failed to generate a usable final investment conclusion for ${company.name}.`);
     }
     return finalConclusion;
@@ -623,7 +675,7 @@ ${buildQuickTakeIdentityRule(company, lang)}`;
     const existingQuestions = Array.isArray(existing?.questions) ? existing!.questions : [];
     const existingQna = Array.isArray(existing?.qna) ? existing!.qna : [];
     const existingConclusion = hasUsableInvestmentConclusion(existing?.conclusion) ? existing!.conclusion! : null;
-    const existingFinalConclusion = this.hasUsableFinalConclusion(existing?.finalConclusion)
+    const existingFinalConclusion = hasUsableFinalConclusion(existing?.finalConclusion)
       ? existing!.finalConclusion!
       : null;
 
@@ -685,6 +737,9 @@ ${buildQuickTakeIdentityRule(company, lang)}`;
     }
 
     let conclusion = existingConclusion;
+    let finalConclusion = existingFinalConclusion;
+    let materialEvents: MaterialEvent[] | undefined;
+
     if (!conclusion) {
       if (onCheckpoint) {
         await onCheckpoint({
@@ -695,11 +750,12 @@ ${buildQuickTakeIdentityRule(company, lang)}`;
         });
       }
       await log(75, 'Synthesizing final report...', 'Analyzing Q&A results and generating investment thesis');
-      conclusion = await this.synthesizeConclusion(company, qnaResults, lang);
+      materialEvents = await this.extractMaterialEvents(company, qnaResults, lang);
+      await log(78, 'Material events extracted', `${materialEvents.length} events for thesis synthesis`);
+      conclusion = await this.synthesizeConclusion(company, qnaResults, lang, materialEvents);
       await log(85, 'Conclusion Synthesized', 'Investment thesis generated');
     }
 
-    let finalConclusion = existingFinalConclusion;
     if (!finalConclusion) {
       if (onCheckpoint && conclusion) {
         await onCheckpoint({
@@ -710,15 +766,23 @@ ${buildQuickTakeIdentityRule(company, lang)}`;
         });
       }
       await log(90, 'Generating Final Conclusion', 'Creating executive summary');
-      finalConclusion = await this.generateFinalConclusion(company, qnaResults, conclusion, lang);
+      materialEvents =
+        materialEvents ?? (await this.extractMaterialEvents(company, qnaResults, lang));
+      finalConclusion = await this.generateFinalConclusion(
+        company,
+        qnaResults,
+        conclusion!,
+        lang,
+        materialEvents
+      );
     }
     await log(100, 'Analysis Complete', `${company.name} analysis finished`);
 
     return {
       questions,
       qna: qnaResults,
-      conclusion,
-      finalConclusion,
+      conclusion: conclusion!,
+      finalConclusion: finalConclusion!,
     };
   }
 

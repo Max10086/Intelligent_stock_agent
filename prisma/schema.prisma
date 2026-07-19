@@ -50,6 +50,7 @@ model User {
   userEvents            UserEvent[]
   returnTrackingAnchors ReturnTrackingAnchor[]
   feedback              UserFeedback[]
+  gainerPreference      UserGainerPreference?
 
   @@index([createdAt])
   @@index([paidAt])
@@ -104,6 +105,7 @@ model BatchJob {
   tickers     String         // Comma-separated list of tickers/queries
   status      JobStatus      @default(PENDING)
   language    String         @default("en")
+  source      String?        // manual | gainer_manual | gainer_auto
   createdAt   DateTime       @default(now())
   updatedAt   DateTime       @updatedAt
   completedAt DateTime?
@@ -225,4 +227,81 @@ model AnalysisJob {
   @@index([batchJobId])
   @@index([userId, completedAt])
   @@index([userId, status, completedAt])
+}
+
+enum GainerMarket {
+  US
+  CN
+  HK
+}
+
+enum GainerPeriod {
+  DAILY
+  WEEKLY
+  THREE_DAY
+}
+
+model MarketGainerSnapshot {
+  id               String         @id @default(uuid())
+  market           GainerMarket
+  period           GainerPeriod
+  tradingDateEnd   String
+  tradingDateStart String?
+  modelProvider    String
+  modelName        String
+  status           String         @default("PENDING")
+  error            String?
+  rawResponse      String?
+  fetchedAt        DateTime       @default(now())
+  entries          MarketGainerEntry[]
+
+  @@unique([market, period, tradingDateEnd])
+  @@index([market, period, fetchedAt])
+}
+
+model MarketGainerEntry {
+  id         String               @id @default(uuid())
+  snapshotId String
+  snapshot   MarketGainerSnapshot @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
+  rank       Int
+  name       String
+  ticker     String
+  exchange   String?
+  changePct  Float
+  blurb      String
+  validated  Boolean              @default(false)
+  createdAt  DateTime             @default(now())
+
+  @@index([ticker, createdAt])
+  @@index([snapshotId, rank])
+}
+
+model MarketGainerAppearance {
+  id                     String       @id @default(uuid())
+  market                 GainerMarket
+  ticker                 String
+  name                   String
+  appearanceScore        Int          @default(0)
+  dailyAppearances14d    Int          @default(0)
+  weeklyAppearances14d   Int          @default(0)
+  lastSeenAt             DateTime
+  firstSeenAt            DateTime
+  autoAnalyzeEligible    Boolean      @default(false)
+  autoAnalyzeTriggeredAt DateTime?
+  updatedAt              DateTime     @updatedAt
+
+  @@unique([market, ticker])
+  @@index([appearanceScore])
+  @@index([autoAnalyzeEligible])
+}
+
+model UserGainerPreference {
+  userId               String   @id
+  user                 User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  autoAnalyzeEnabled   Boolean  @default(false)
+  autoAnalyzeMarkets   String   @default("US,CN")
+  minAppearanceScore   Int      @default(2)
+  maxAutoTickersPerRun Int      @default(5)
+  language             String   @default("cn")
+  updatedAt            DateTime @updatedAt
 }

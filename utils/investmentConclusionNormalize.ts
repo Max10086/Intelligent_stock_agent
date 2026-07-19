@@ -77,6 +77,18 @@ const normalizeConclusionSection = (raw: any) => ({
   evidence: normalizeEvidenceList(pickEvidenceField(raw)),
 });
 
+const normalizeExpectationGapSection = (raw: any) => {
+  const base = normalizeConclusionSection(raw);
+  const rawGap = getFirstString(raw, ['gap_assessment', 'gapAssessment', 'gap']);
+  let gap_assessment: 'Limited' | 'Significant' | undefined;
+  if (/^significant$/i.test(rawGap)) gap_assessment = 'Significant';
+  else if (/^limited$/i.test(rawGap)) gap_assessment = 'Limited';
+  else if (/Significant Gap Identified/i.test(base.summary)) gap_assessment = 'Significant';
+  else if (/Limited Gap Identified|预期差有限/.test(base.summary)) gap_assessment = 'Limited';
+
+  return { ...base, ...(gap_assessment ? { gap_assessment } : {}) };
+};
+
 const getConclusionSection = (raw: any, keys: string[]) => {
   for (const key of keys) {
     if (raw?.[key]) return raw[key];
@@ -129,7 +141,7 @@ export const normalizeInvestmentConclusion = (raw: any): InvestmentConclusion =>
         sectionsRoot?.IndustryCycle ||
         sectionsRoot?.industryCycle
     ),
-    ExpectationGap: normalizeConclusionSection(
+    ExpectationGap: normalizeExpectationGapSection(
       getConclusionSection(raw, ['ExpectationGap', 'expectationGap', 'expectation_gap']) ||
         sectionsRoot?.ExpectationGap ||
         sectionsRoot?.expectationGap

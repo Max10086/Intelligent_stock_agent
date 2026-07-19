@@ -1,10 +1,12 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useMemo } from 'react';
 import { Language, AnalysisState, RuntimeModelConfig } from '../types.ts';
 import { getUIText } from '../constants.ts';
 import { QueueDashboardState, QueueJobItem } from '../hooks/useBatchJobs.ts';
+import { useCatalogCumulativeReturns } from '../hooks/useCatalogCumulativeReturns.ts';
 import { apiFetch } from '../utils/authenticatedFetch.ts';
 import { AnalysisModeSplitButton } from './AnalysisModeSplitButton.tsx';
 import { BrandMark } from './BrandMark.tsx';
+import { CumulativeReturnCell } from './CumulativeReturnCell.tsx';
 import { ArrowPathIcon, QueueListIcon } from './icons.tsx';
 
 interface BatchQueuePageProps {
@@ -63,6 +65,19 @@ export const BatchQueuePage: React.FC<BatchQueuePageProps> = ({
   const [loadingReportId, setLoadingReportId] = useState<string | null>(null);
   const [retryingJobId, setRetryingJobId] = useState<string | null>(null);
   const uiText = getUIText(language);
+
+  const returnTrackItems = useMemo(
+    () =>
+      (queueStatus?.jobs ?? []).map(job => ({
+        id: job.id,
+        ticker: job.ticker,
+        companyName: job.companyName,
+        currentPrice: job.status === 'COMPLETED' ? job.currentPrice : null,
+        exchange: job.result?.focusCompany?.profile?.exchange ?? null,
+      })),
+    [queueStatus?.jobs]
+  );
+  const { returnsById } = useCatalogCumulativeReturns(returnTrackItems);
 
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
@@ -347,7 +362,7 @@ export const BatchQueuePage: React.FC<BatchQueuePageProps> = ({
 
         {queueStatus && queueStatus.jobs.length > 0 ? (
           <div className="overflow-x-auto rounded-xl border border-gray-700/80">
-            <table className="w-full min-w-[720px]">
+            <table className="w-full min-w-[860px]">
               <thead>
                 <tr className="border-b border-gray-700 bg-gray-900/40">
                   <th className="text-left py-3 px-3 text-xs font-semibold text-gray-400 uppercase tracking-wide">
@@ -358,6 +373,9 @@ export const BatchQueuePage: React.FC<BatchQueuePageProps> = ({
                   </th>
                   <th className="text-left py-3 px-3 text-xs font-semibold text-gray-400 uppercase tracking-wide">
                     {uiText.batchColPrice}
+                  </th>
+                  <th className="text-left py-3 px-3 text-xs font-semibold text-gray-400 uppercase tracking-wide">
+                    {uiText.catalogColCumulativeReturn}
                   </th>
                   <th className="text-left py-3 px-3 text-xs font-semibold text-gray-400 uppercase tracking-wide">
                     {uiText.batchColConclusion}
@@ -390,6 +408,12 @@ export const BatchQueuePage: React.FC<BatchQueuePageProps> = ({
                       </td>
                       <td className="py-3 px-3 text-gray-200 text-sm whitespace-nowrap" title={formatPrice(job)}>
                         {formatPrice(job)}
+                      </td>
+                      <td className="py-3 px-3 text-sm whitespace-nowrap">
+                        <CumulativeReturnCell
+                          display={returnsById[job.id]}
+                          loadingLabel={uiText.catalogReturnLoading}
+                        />
                       </td>
                       <td className="py-3 px-3 text-gray-300 text-sm min-w-[8rem]" title={job.overallConclusion || ''}>
                         {job.overallConclusion ? (

@@ -15,8 +15,10 @@ interface HeaderProps {
   onLanguageChange: (lang: Language) => void;
   /** Hidden on the idle search home where the input form is the entry point. */
   showNewAnalysisButton?: boolean;
-  currentView?: 'single' | 'batch' | 'compare';
+  currentView?: 'single' | 'batch' | 'compare' | 'gainers' | 'catalog';
   onViewChange?: (view: 'single' | 'batch') => void;
+  onOpenGainers?: () => void;
+  onOpenCatalog?: () => void;
   showStepTimeline?: boolean;
   onToggleStepTimeline?: () => void;
   userEmail?: string | null;
@@ -35,6 +37,8 @@ export const Header: React.FC<HeaderProps> = ({
   onReset,
   onToggleHistory,
   onOpenCompare,
+  onOpenGainers,
+  onOpenCatalog,
   language,
   onLanguageChange,
   showNewAnalysisButton = true,
@@ -116,6 +120,32 @@ export const Header: React.FC<HeaderProps> = ({
               aria-pressed={showStepTimeline}
             >
               {uiText.stepTimelineToggle}
+            </button>
+          )}
+          {onOpenCatalog && (
+            <button
+              type="button"
+              onClick={onOpenCatalog}
+              className={`px-3 py-2 text-sm font-medium rounded-md focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-gray-900 focus:ring-blue-500 transition-colors ${
+                currentView === 'catalog'
+                  ? 'bg-indigo-700 text-white hover:bg-indigo-600'
+                  : 'text-gray-200 bg-gray-700 hover:bg-gray-600'
+              }`}
+            >
+              {uiText.catalogNav}
+            </button>
+          )}
+          {onOpenGainers && (
+            <button
+              type="button"
+              onClick={onOpenGainers}
+              className={`px-3 py-2 text-sm font-medium rounded-md focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-gray-900 focus:ring-blue-500 transition-colors ${
+                currentView === 'gainers'
+                  ? 'bg-emerald-700 text-white hover:bg-emerald-600'
+                  : 'text-gray-200 bg-gray-700 hover:bg-gray-600'
+              }`}
+            >
+              {uiText.gainerNav}
             </button>
           )}
           {onOpenCompare && (

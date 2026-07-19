@@ -7,6 +7,7 @@ import { updateJobStatus } from './queue.js';
 import { recordCompanyAnalysisUsage } from '../services/usageLimit.js';
 import { invalidateHistoryListCache } from '../routes/history.js';
 import { isCompanyAnalysisComplete } from '../../utils/analysisComplete.js';
+import { createGoogleGenAIClient } from '../lib/googleGenAIClient.js';
 
 // --- Configuration ---
 const MAX_CONCURRENT_JOBS = 2;
@@ -18,14 +19,7 @@ let aiClient: GoogleGenAI | null = null;
 function getAIClient(): GoogleGenAI {
   if (!aiClient) {
     try {
-      const projectId = process.env.GOOGLE_CLOUD_PROJECT || 'smartstockagent';
-      const location = process.env.GOOGLE_CLOUD_LOCATION || 'global';
-      
-      aiClient = new GoogleGenAI({
-        vertexai: true,
-        project: projectId,
-        location: location,
-      });
+      aiClient = createGoogleGenAIClient();
       console.log('✅ Process: Vertex AI client initialized');
     } catch (error) {
       console.error('❌ Process: Failed to initialize Vertex AI client:', error);

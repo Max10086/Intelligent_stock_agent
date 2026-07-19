@@ -38,6 +38,33 @@ const SECTION_TOPIC_PATTERNS: Record<ThesisSectionKey, RegExp[]> = {
   ],
 };
 
+/** Additional signals from answer text (partnerships, announcements, etc.). */
+const ANSWER_CONTENT_PATTERNS: Partial<Record<ThesisSectionKey, RegExp[]>> = {
+  UpstreamSupplyChain: [
+    /合作备忘录|战略合作协议|战略协议|MoU|memorandum of understanding|joint venture|合资|联营|战略伙伴|战略供应商|战略客户|签署.*合作|partner(?:ship)? with|collaborat/i,
+    /与.{1,24}(公司|集团|Corp|Inc|Ltd|Limited|Corporation).{0,12}(签署|达成|建立).{0,12}合作/i,
+  ],
+  OutlookRisks: [
+    /公告|披露|投资者关系|业绩说明|通线|投产|点火|送样|量产|获批|监管|回购|增持|减持|并购|收购|announcement|filing|IR activity|sample|ramp|mass production/i,
+    /过去\s*90\s*个自然日|last\s*90\s*calendar\s*days|重大外部事件|material external event/i,
+  ],
+  BusinessModel: [
+    /新业务|第[二三四N1-9]曲线|非显示|转型|新增长|new business|non-display|diversif|segment expansion/i,
+  ],
+  Financials: [
+    /回购|注销|增发|配股|股息|buyback|repurchase|offering|dividend/i,
+  ],
+};
+
+const SECTION_PRIORITY_PATTERNS: Partial<Record<ThesisSectionKey, RegExp[]>> = {
+  UpstreamSupplyChain: [
+    /合作|备忘录|MoU|partnership|合资|战略协议|counterparty|合作方/i,
+  ],
+  OutlookRisks: [
+    /90\s*个自然日|90\s*calendar\s*days|重大事件|material event|catalyst|公告|announcement/i,
+  ],
+};
+
 const splitSentences = (text: string): string[] =>
   text
     .split(/(?<=[。！？；\.!?;])\s+|\n+/)
@@ -81,6 +108,48 @@ export const classifyQuestionTopics = (question: string): TopicBucket[] => {
   return matched.length > 0 ? matched : ['General'];
 };
 
+/** Route Q&A by question keywords AND answer content (partnerships, announcements, etc.). */
+export const classifyQnaTopics = (question: string, answer: string): TopicBucket[] => {
+  const fromQuestion = classifyQuestionTopics(question);
+  const merged = new Set<ThesisSectionKey>();
+
+  for (const topic of fromQuestion) {
+    if (topic !== 'General') merged.add(topic);
+  }
+
+  for (const key of THESIS_SECTION_KEYS) {
+    const patterns = ANSWER_CONTENT_PATTERNS[key];
+    if (patterns?.some(pattern => pattern.test(answer))) {
+      merged.add(key);
+    }
+  }
+
+  if (merged.size === 0) return ['General'];
+  return [...merged];
+};
+
+const scoreItemForSection = (item: CompressibleQnA, sectionKey: ThesisSectionKey): number => {
+  const text = `${item.question}\n${item.answer}`;
+  const patterns = SECTION_PRIORITY_PATTERNS[sectionKey] || [];
+  let score = 0;
+  for (const pattern of patterns) {
+    if (pattern.test(text)) score += 2;
+  }
+  if (/合作方|counterpart|partners?|MoU|备忘录/.test(text)) score += 1;
+  return score;
+};
+
+const prioritizeItemsForSection = (
+  items: CompressibleQnA[],
+  sectionKey: ThesisSectionKey
+): CompressibleQnA[] => {
+  const patterns = SECTION_PRIORITY_PATTERNS[sectionKey];
+  if (!patterns?.length) return items;
+  return [...items].sort(
+    (a, b) => scoreItemForSection(b, sectionKey) - scoreItemForSection(a, sectionKey)
+  );
+};
+
 export const groupQnaByTopic = (
   qna: CompressibleQnA[]
 ): Record<TopicBucket, CompressibleQnA[]> => {
@@ -89,7 +158,7 @@ export const groupQnaByTopic = (
   ) as Record<TopicBucket, CompressibleQnA[]>;
 
   for (const item of qna) {
-    const topics = classifyQuestionTopics(item.question);
+    const topics = classifyQnaTopics(item.question, item.answer);
     for (const topic of topics) {
       grouped[topic].push(item);
     }
@@ -132,7 +201,9 @@ export const formatQnaForSection = (
   maxAnswerChars = 1400
 ): Array<{ q: string; a: string; sources?: string[] }> => {
   const grouped = groupQnaByTopic(qna);
-  const primary = grouped[sectionKey].map(item => formatCompressedItem(item, maxAnswerChars));
+  const primary = prioritizeItemsForSection(grouped[sectionKey], sectionKey).map(item =>
+    formatCompressedItem(item, maxAnswerChars)
+  );
   const general = grouped.General.map(item => formatCompressedItem(item, maxAnswerChars));
 
   const seen = new Set<string>();

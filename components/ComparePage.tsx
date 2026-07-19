@@ -338,14 +338,6 @@ export const ComparePage: React.FC<ComparePageProps> = ({
     [basket]
   );
 
-  const eligibleByReportId = useMemo(() => {
-    const map = new Map<string, EligibleCompareCompany[]>();
-    for (const report of history) {
-      map.set(report.id, listEligibleCompareCompanies(report));
-    }
-    return map;
-  }, [history]);
-
   const expandReport = useCallback(
     async (reportId: string) => {
       if (expandedReportId === reportId) {
@@ -354,13 +346,8 @@ export const ComparePage: React.FC<ComparePageProps> = ({
         return;
       }
 
-      const cached = eligibleByReportId.get(reportId);
-      if (cached !== undefined) {
-        setExpandedReportId(reportId);
-        setExpandedCompanies(cached);
-        return;
-      }
-
+      // Always load the full report: slim history rows truncate bullets/Q&A and
+      // must not be used alone for compare eligibility.
       setLoadingReportId(reportId);
       try {
         const report = await fetchReport(reportId);
@@ -373,7 +360,7 @@ export const ComparePage: React.FC<ComparePageProps> = ({
         setLoadingReportId(null);
       }
     },
-    [expandedReportId, eligibleByReportId, setError, fetchReport]
+    [expandedReportId, setError, fetchReport]
   );
 
   const handleRunCompare = async () => {

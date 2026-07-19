@@ -47,6 +47,8 @@ export interface GroundingSource {
 export interface ConclusionSectionData {
   summary: string;
   evidence: string[];
+  /** ExpectationGap section only: quality gate for expectation-gap Q&A. */
+  gap_assessment?: 'Limited' | 'Significant';
 }
 
 export interface InvestmentConclusion {
@@ -75,9 +77,19 @@ export interface FinalConclusionVsPrior {
   change_summary?: string;
 }
 
+export interface FinalConclusionDecision {
+  rating: string;
+  confidence_score: number;
+  bear_case_downside: string;
+  gap_assessment?: 'Limited' | 'Significant';
+  thesis_invalidation: string;
+  bear_case_conditions: string[];
+}
+
 export interface FinalConclusion {
   overall_conclusion: string;
   bullet_points: FinalConclusionPoint[];
+  decision?: FinalConclusionDecision;
   vs_prior?: FinalConclusionVsPrior;
 }
 

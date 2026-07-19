@@ -1,5 +1,5 @@
 import express from 'express';
-import { GoogleGenAI } from '@google/genai';
+import type { GoogleGenAI } from '@google/genai';
 import { ModelClient } from '../services/modelClient.js';
 import { CompareService } from '../services/compare.js';
 import type { CreateCompareRequest, FollowUpCompareRequest } from '../../types/compare.js';
@@ -7,6 +7,7 @@ import type { Language } from '../../types.js';
 import { requireAuth } from '../middleware/auth.js';
 import { trackUserEvent } from '../services/analytics.js';
 import { prisma } from '../db.js';
+import { createGoogleGenAIClient } from '../lib/googleGenAIClient.js';
 
 const router = express.Router();
 router.use(requireAuth);
@@ -17,13 +18,7 @@ let compareService: CompareService | null = null;
 
 function getAIClient(): GoogleGenAI {
   if (!aiClient) {
-    const projectId = process.env.GOOGLE_CLOUD_PROJECT || 'smartstockagent';
-    const location = process.env.GOOGLE_CLOUD_LOCATION || 'global';
-    aiClient = new GoogleGenAI({
-      vertexai: true,
-      project: projectId,
-      location,
-    });
+    aiClient = createGoogleGenAIClient();
   }
   return aiClient;
 }

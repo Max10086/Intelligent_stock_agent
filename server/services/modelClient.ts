@@ -31,6 +31,8 @@ export type ModelCallStep =
   | 'answer_question_synthesis'
   | 'synthesize_conclusion'
   | 'synthesize_conclusion_section'
+  | 'extract_material_events'
+  | 'follow_up_extract_material_events'
   | 'synthesize_conclusion_integrate'
   | 'follow_up_synthesize_conclusion_section'
   | 'follow_up_synthesize_conclusion_integrate'
@@ -38,6 +40,9 @@ export type ModelCallStep =
   | 'follow_up_final_conclusion'
   | 'quick_take'
   | 'market_hot_topics'
+  | 'market_gainer_fetch_us'
+  | 'market_gainer_fetch_cn'
+  | 'market_gainer_blurb_us'
   | 'cross_company_compare'
   | 'cross_company_compare_follow_up'
   | 'custom';
@@ -75,7 +80,11 @@ interface GenerateParams {
   provider?: ModelProvider | 'doubao';
   model?: string;
   requireGoogleSearch?: boolean;
+  /** When set (Doubao Q&A), runs one search per query and merges deduped results. */
+  searchQueries?: string[];
 }
+
+const MAX_DOUBAO_MULTI_SEARCH_QUERIES = 8;
 
 const RETRYABLE_ERROR_PATTERN =
   /(fetch failed|sending request|socket hang up|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|503|502|500|429|700429|frequency exceeded|rate limit|terminated|UND_ERR_SOCKET|other side closed|Doubao search returned 0 results)/i;
@@ -103,9 +112,14 @@ const DEEPSEEK_ALWAYS_NO_THINKING_STEPS = new Set<ModelCallStep>([
   'follow_up_question_generation',
   'synthesize_conclusion_section',
   'follow_up_synthesize_conclusion_section',
+  'extract_material_events',
+  'follow_up_extract_material_events',
   'cross_company_compare',
   'cross_company_compare_follow_up',
   'market_hot_topics',
+  'market_gainer_fetch_us',
+  'market_gainer_fetch_cn',
+  'market_gainer_blurb_us',
 ]);
 
 /** Needs factual recall + structured JSON — medium thinking. */
@@ -160,6 +174,8 @@ const getDeepSeekTimeoutMs = (step: ModelCallStep): number => {
     return ANSWER_QUESTION_TIMEOUT_MS;
   }
   if (step === 'quick_take') return 90_000;
+  if (step === 'market_gainer_fetch_us' || step === 'market_gainer_fetch_cn') return 180_000;
+  if (step === 'market_gainer_blurb_us') return 90_000;
   if (
     step === 'synthesize_conclusion_section' ||
     step === 'follow_up_synthesize_conclusion_section' ||
@@ -169,6 +185,30 @@ const getDeepSeekTimeoutMs = (step: ModelCallStep): number => {
     return 360_000;
   }
   return 180_000;
+};
+
+const getVertexTimeoutMs = (step: ModelCallStep): number => {
+  if (step === 'market_gainer_fetch_us' || step === 'market_gainer_fetch_cn') return 180_000;
+  if (step === 'market_gainer_blurb_us') return 90_000;
+  if (step === 'quick_take') return 90_000;
+  return 180_000;
+};
+
+const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`${label} timed out after ${timeoutMs}ms`)),
+          timeoutMs
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 };
 
 const getDeepSeekRetryDelayMs = (attempt: number, message: string): number => {
@@ -237,24 +277,50 @@ interface DoubaoQnaContext {
   searchQuery: string;
 }
 
+const normalizeDoubaoSearchQuery = (query: string): string =>
+  query.replace(/\s+/g, ' ').trim().slice(0, 100);
+
 const extractDoubaoQnaContext = (prompt: string): DoubaoQnaContext => {
+  const suggestedSearchMatch = prompt.match(/Suggested search:\s*(.+)$/im);
+  if (suggestedSearchMatch) {
+    const searchQuery = normalizeDoubaoSearchQuery(suggestedSearchMatch[1]);
+    return { companyName: '', question: searchQuery, searchQuery };
+  }
+
+  const cnMatch = prompt.match(/回答关于「([^」]+)」.*?的问题：「([^」]+)」/s);
+  if (cnMatch) {
+    const companyName = cnMatch[1].trim();
+    const question = cnMatch[2].trim();
+    const searchQuery = normalizeDoubaoSearchQuery(`${companyName} ${question}`);
+    return { companyName, question, searchQuery };
+  }
+
+  const cnFollowUpMatch = prompt.match(/跟进问题：「([^」]+)」/s);
+  if (cnFollowUpMatch) {
+    const question = cnFollowUpMatch[1].trim();
+    const companyMatch = prompt.match(/「([^」]+)」（[^）]+）/);
+    const companyName = companyMatch?.[1]?.trim() || '';
+    const searchQuery = normalizeDoubaoSearchQuery(`${companyName} ${question}`);
+    return { companyName, question, searchQuery };
+  }
+
   const qnaMatch = prompt.match(/answer this question about\s+"([^"]+)"\s+in\s+[^:]+:\s+"([^"]+)"/i);
   if (qnaMatch) {
     const companyName = qnaMatch[1].trim();
     const question = qnaMatch[2].trim();
-    const searchQuery = `${companyName} ${question}`.replace(/\s+/g, ' ').trim().slice(0, 100);
+    const searchQuery = normalizeDoubaoSearchQuery(`${companyName} ${question}`);
     return { companyName, question, searchQuery };
   }
 
   const quotedMatches = [...prompt.matchAll(/"([^"]+)"/g)].map(match => match[1].trim()).filter(Boolean);
   const companyName = quotedMatches[0] || '';
   const question = quotedMatches[1] || quotedMatches[0] || prompt.replace(/\s+/g, ' ').trim().slice(0, 200);
-  const searchQuery = `${companyName} ${question}`.replace(/\s+/g, ' ').trim().slice(0, 100);
+  const searchQuery = normalizeDoubaoSearchQuery(`${companyName} ${question}`);
   return { companyName, question, searchQuery };
 };
 
 const buildDoubaoCustomPayload = (searchQuery: string) => {
-  const query = searchQuery.replace(/\s+/g, ' ').trim().slice(0, 100);
+  const query = normalizeDoubaoSearchQuery(searchQuery);
   return {
     Query: query,
     SearchType: DOUBAO_CUSTOM_SEARCH_TYPE,
@@ -352,6 +418,28 @@ const buildDoubaoSearchContextText = (data: any, maxResults = 10): string => {
     data?.Result?.CustomSearchResp?.SearchContext?.OriginQuery;
   const prefix = typeof query === 'string' && query.trim() ? `Search results for "${query.trim()}":` : 'Search results:';
   return `${prefix}\n${lines.join('\n')}`.trim();
+};
+
+const buildDoubaoJsonSynthesisPrompt = (
+  originalPrompt: string,
+  searchContextText: string,
+  resultCount: number
+): string => {
+  const searchSection = searchContextText.trim()
+    ? searchContextText.trim()
+    : 'No web results were returned for this query.';
+
+  return `${originalPrompt}
+
+Use the following web search results as your primary evidence. Return ONLY valid JSON exactly as specified above — no markdown, no prose outside JSON.
+
+Web search results (${resultCount} pages retrieved):
+${searchSection}
+
+JSON requirements:
+- Ground every entry in the search results; do not invent companies or tickers.
+- Never use placeholder names like 公司A/公司B or sequential dummy codes.
+- If search results are insufficient, return fewer entries rather than fabricating data.`;
 };
 
 const buildDoubaoSynthesisPrompt = (originalPrompt: string, searchContextText: string, resultCount: number): string => {
@@ -699,7 +787,7 @@ export class ModelClient {
     return model;
   }
 
-  private async executeDoubaoSearchOnce(originalPrompt: string): Promise<{
+  private async executeDoubaoSearchOnceByQuery(searchQuery: string): Promise<{
     data: any;
     webResults: any[];
     groundingChunks: Array<{ web: { uri: string; title: string } }>;
@@ -712,8 +800,8 @@ export class ModelClient {
       throw new Error('DOUBAO_CUSTOM_API_KEY (or DOUBAO_SEARCH_API_KEY) is missing while search provider is doubao.');
     }
 
-    const { searchQuery } = extractDoubaoQnaContext(originalPrompt);
-    const payload = buildDoubaoCustomPayload(searchQuery);
+    const query = normalizeDoubaoSearchQuery(searchQuery);
+    const payload = buildDoubaoCustomPayload(query);
 
     const response = await fetch(DOUBAO_CUSTOM_BASE_URL, {
       method: 'POST',
@@ -744,12 +832,24 @@ export class ModelClient {
       webResults,
       groundingChunks,
       searchContextText,
-      query: searchQuery,
+      query,
       usage: parseDeepSeekUsage(data?.usage, true),
     };
   }
 
-  private async executeDoubaoSearch(originalPrompt: string): Promise<{
+  private async executeDoubaoSearchOnce(originalPrompt: string): Promise<{
+    data: any;
+    webResults: any[];
+    groundingChunks: Array<{ web: { uri: string; title: string } }>;
+    searchContextText: string;
+    query: string;
+    usage: UsageMetrics;
+  }> {
+    const { searchQuery } = extractDoubaoQnaContext(originalPrompt);
+    return this.executeDoubaoSearchOnceByQuery(searchQuery);
+  }
+
+  private async executeDoubaoSearchByQuery(searchQuery: string): Promise<{
     data: any;
     webResults: any[];
     groundingChunks: Array<{ web: { uri: string; title: string } }>;
@@ -758,11 +858,11 @@ export class ModelClient {
     usage: UsageMetrics;
   }> {
     return doubaoSearchSemaphore.run(async () => {
-      let lastResult: Awaited<ReturnType<ModelClient['executeDoubaoSearchOnce']>> | null = null;
+      let lastResult: Awaited<ReturnType<ModelClient['executeDoubaoSearchOnceByQuery']>> | null = null;
 
       for (let attempt = 1; attempt <= DOUBAO_SEARCH_MAX_ATTEMPTS; attempt++) {
         try {
-          const result = await this.executeDoubaoSearchOnce(originalPrompt);
+          const result = await this.executeDoubaoSearchOnceByQuery(searchQuery);
           lastResult = result;
 
           if (result.webResults.length > 0) {
@@ -797,6 +897,108 @@ export class ModelClient {
       }
       throw new Error('Doubao search failed after retries.');
     });
+  }
+
+  private async executeDoubaoSearch(originalPrompt: string): Promise<{
+    data: any;
+    webResults: any[];
+    groundingChunks: Array<{ web: { uri: string; title: string } }>;
+    searchContextText: string;
+    query: string;
+    usage: UsageMetrics;
+  }> {
+    const { searchQuery } = extractDoubaoQnaContext(originalPrompt);
+    return this.executeDoubaoSearchByQuery(searchQuery);
+  }
+
+  private formatDoubaoWebResultLine(item: any, index: number): string {
+    const title = typeof item?.Title === 'string' ? item.Title.trim() : `Result ${index + 1}`;
+    const snippet =
+      (typeof item?.Snippet === 'string' && item.Snippet.trim()) ||
+      (typeof item?.Summary === 'string' && item.Summary.trim()) ||
+      (typeof item?.Content === 'string' && item.Content.trim()) ||
+      '';
+    const url = typeof item?.Url === 'string' ? item.Url.trim() : '';
+    const normalizedSnippet = snippet.replace(/\s+/g, ' ').slice(0, 900);
+    const urlSuffix = url ? ` (${url})` : '';
+    return `- ${title}${urlSuffix}${normalizedSnippet ? `: ${normalizedSnippet}` : ''}`;
+  }
+
+  private async executeDoubaoMultiSearch(searchQueries: string[]): Promise<{
+    webResults: any[];
+    groundingChunks: Array<{ web: { uri: string; title: string } }>;
+    searchContextText: string;
+    query: string;
+    usage: UsageMetrics;
+  }> {
+    const normalized = Array.from(
+      new Set(searchQueries.map(q => normalizeDoubaoSearchQuery(q)).filter(Boolean))
+    ).slice(0, MAX_DOUBAO_MULTI_SEARCH_QUERIES);
+
+    if (!normalized.length) {
+      throw new Error('Doubao multi-search received no queries.');
+    }
+
+    const batches = await Promise.all(
+      normalized.map(async query => {
+        try {
+          const result = await this.executeDoubaoSearchByQuery(query);
+          return { query, result, ok: true as const };
+        } catch (error) {
+          console.warn(`[Doubao Multi-Search] query failed: "${query}"`, error);
+          return { query, ok: false as const };
+        }
+      })
+    );
+
+    const successful = batches.filter(
+      (batch): batch is { query: string; result: Awaited<ReturnType<ModelClient['executeDoubaoSearchByQuery']>>; ok: true } =>
+        batch.ok && batch.result.webResults.length > 0
+    );
+
+    if (!successful.length) {
+      throw new Error(`Doubao multi-search returned 0 results across ${normalized.length} queries`);
+    }
+
+    const webResultsByUrl = new Map<string, any>();
+    for (const batch of successful) {
+      for (const item of batch.result.webResults) {
+        const url = typeof item?.Url === 'string' ? item.Url.trim() : '';
+        const key = url || `${batch.query}#${webResultsByUrl.size}`;
+        if (!webResultsByUrl.has(key)) {
+          webResultsByUrl.set(key, item);
+        }
+      }
+    }
+    const webResults = Array.from(webResultsByUrl.values());
+    const groundingChunks = mergeGroundingChunks(...successful.map(batch => batch.result.groundingChunks));
+
+    const sections = successful.map(batch => {
+      const lines = batch.result.webResults
+        .slice(0, DOUBAO_CUSTOM_RESULT_COUNT)
+        .map((item, index) => this.formatDoubaoWebResultLine(item, index));
+      return `Query "${batch.query}" (${batch.result.webResults.length} pages):\n${lines.join('\n')}`;
+    });
+
+    const searchContextText = `Multi-pass Doubao web search (${successful.length}/${normalized.length} queries succeeded, ${webResults.length} unique pages):\n\n${sections.join('\n\n')}`;
+    const usage = mergeUsage(...successful.map(batch => batch.result.usage));
+
+    console.info(
+      '[Doubao Multi-Search]',
+      JSON.stringify({
+        queries: normalized,
+        succeeded: successful.length,
+        uniquePages: webResults.length,
+      })
+    );
+
+    return {
+      webResults,
+      groundingChunks,
+      searchContextText,
+      query: normalized.join(' | '),
+      usage,
+    };
   }
 
   private async executeVertexGoogleSearch(originalPrompt: string): Promise<{
@@ -848,9 +1050,23 @@ export class ModelClient {
 
     const searchStageStartedAt = new Date();
     const searchStageStartMs = Date.now();
-    const searchResult = await this.executeDoubaoSearch(originalPrompt);
 
-    logDoubaoSearchDiagnostics(searchResult.data, searchResult.query, searchResult.webResults);
+    const explicitQueries = (params.searchQueries || [])
+      .map(q => normalizeDoubaoSearchQuery(q))
+      .filter(Boolean);
+
+    const searchResult = explicitQueries.length
+      ? await this.executeDoubaoMultiSearch([
+          extractDoubaoQnaContext(originalPrompt).searchQuery,
+          ...explicitQueries,
+        ])
+      : await this.executeDoubaoSearch(originalPrompt);
+
+    logDoubaoSearchDiagnostics(
+      'data' in searchResult ? searchResult.data : {},
+      searchResult.query,
+      searchResult.webResults
+    );
 
     this.emitTelemetry({
       step: 'doubao_search',
@@ -884,6 +1100,7 @@ export class ModelClient {
       }
     }
 
+    const wantsJson = params.config?.responseMimeType === 'application/json';
     const synthesisPrompt =
       isAdvancedSearch && googleResult
         ? buildAdvancedDualSearchSynthesisPrompt(
@@ -893,17 +1110,24 @@ export class ModelClient {
             googleResult.searchContextText,
             googleResult.groundingChunks.length
           )
-        : buildDoubaoSynthesisPrompt(
-            originalPrompt,
-            searchResult.searchContextText,
-            searchResult.webResults.length
-          );
+        : wantsJson
+          ? buildDoubaoJsonSynthesisPrompt(
+              originalPrompt,
+              searchResult.searchContextText,
+              searchResult.webResults.length
+            )
+          : buildDoubaoSynthesisPrompt(
+              originalPrompt,
+              searchResult.searchContextText,
+              searchResult.webResults.length
+            );
 
     const synthesisResponse = await this.generateContent({
       step: 'answer_question_synthesis',
       contents: { role: 'user', parts: [{ text: synthesisPrompt }] },
       provider: runtime.analysis.provider,
       model: runtime.analysis.model,
+      config: wantsJson ? params.config : undefined,
       requireGoogleSearch: false,
     });
 
@@ -919,7 +1143,7 @@ export class ModelClient {
     );
 
     this.emitTelemetry({
-      step: params.step === 'follow_up_answer_question' ? 'follow_up_answer_question' : 'answer_question',
+      step: params.step,
       provider: 'doubao',
       model: chosen.model,
       startedAt: startedAt.toISOString(),
@@ -963,7 +1187,8 @@ export class ModelClient {
         if (
           params.step === 'answer_question' ||
           params.step === 'follow_up_answer_question' ||
-          params.step === 'market_hot_topics'
+          params.step === 'market_hot_topics' ||
+          params.step === 'market_gainer_fetch_cn'
         ) {
           return await this.generateDoubaoAnswerQuestion(
             params,
@@ -972,7 +1197,7 @@ export class ModelClient {
             startMs
           );
         }
-        throw new Error(`Doubao provider is only supported for answer_question, follow_up_answer_question and market_hot_topics, got step=${params.step}`);
+        throw new Error(`Doubao provider is only supported for answer_question, follow_up_answer_question, market_hot_topics and market_gainer_fetch_cn, got step=${params.step}`);
       }
 
       if (chosen.provider === 'deepseek') {
@@ -1065,13 +1290,18 @@ export class ModelClient {
       const maxAttempts = 3;
       let result: any = null;
       let lastError: any = null;
+      const vertexTimeoutMs = getVertexTimeoutMs(params.step);
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
-          result = await this.vertexClient.models.generateContent({
-            model: chosen.model,
-            contents: params.contents,
-            config: params.config || {},
-          });
+          result = await withTimeout(
+            this.vertexClient.models.generateContent({
+              model: chosen.model,
+              contents: params.contents,
+              config: params.config || {},
+            }),
+            vertexTimeoutMs,
+            `Vertex ${params.step}`
+          );
           lastError = null;
           break;
         } catch (error: any) {

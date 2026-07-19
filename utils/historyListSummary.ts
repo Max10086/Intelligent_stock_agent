@@ -49,6 +49,7 @@ function slimFinalConclusion(finalConclusion: FinalConclusion | null): FinalConc
       argument: point.argument,
       evidence: (point.evidence || []).slice(0, 2),
     })),
+    ...(finalConclusion.decision ? { decision: finalConclusion.decision } : {}),
     ...(finalConclusion.vs_prior ? { vs_prior: finalConclusion.vs_prior } : {}),
   };
 }

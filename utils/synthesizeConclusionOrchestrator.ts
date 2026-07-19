@@ -20,6 +20,8 @@ export type SynthesizeSectionCaller = (
   strictRetry: boolean
 ) => Promise<SynthesizeSectionResult>;
 
+import type { MaterialEvent } from './materialEventsExtract.ts';
+
 export const synthesizeInvestmentConclusionBySections = async (options: {
   companyName: string;
   outputLanguage: string;
@@ -28,9 +30,14 @@ export const synthesizeInvestmentConclusionBySections = async (options: {
   callSection: SynthesizeSectionCaller;
   concurrency?: number;
   marketContext?: string;
+  materialEvents?: MaterialEvent[];
+  lang?: 'cn' | 'en';
 }): Promise<InvestmentConclusion> => {
   const tasks = THESIS_SECTION_KEYS.map((sectionKey, index) => ({ index, item: sectionKey }));
   const sectionResults = new Map<ThesisSectionKey, InvestmentConclusion[ThesisSectionKey]>();
+
+  const materialEvents = options.materialEvents ?? [];
+  const lang = options.lang ?? (/chinese/i.test(options.outputLanguage) ? 'cn' : 'en');
 
   await runParallelIndexedTasks<ThesisSectionKey, SynthesizeSectionResult>(
     tasks,
@@ -45,7 +52,9 @@ export const synthesizeInvestmentConclusionBySections = async (options: {
             options.qna,
             task.item,
             strict,
-            options.marketContext
+            options.marketContext,
+            materialEvents,
+            lang
           ),
           strict
         );

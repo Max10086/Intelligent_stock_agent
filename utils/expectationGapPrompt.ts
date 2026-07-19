@@ -1,11 +1,8 @@
 import type { CompanyProfile, Language } from '../types.ts';
 import { buildCompanyIdentityBlock } from './companyIdentity.ts';
+import { EXPECTATION_GAP_QUESTION_COUNT } from './questionCounts.ts';
 
-/** Fixed count of expectation-gap questions appended to each company Q&A set. */
-export const EXPECTATION_GAP_QUESTION_COUNT = 3;
-
-export const getCoreQuestionCount = (totalQuestionCount: number): number =>
-  Math.max(1, totalQuestionCount - EXPECTATION_GAP_QUESTION_COUNT);
+export { EXPECTATION_GAP_QUESTION_COUNT, getCoreQuestionCount } from './questionCounts.ts';
 
 export const buildExpectationGapQuestionsPrompt = (
   company: Pick<CompanyProfile, 'name' | 'ticker' | 'exchange'>,

@@ -9,8 +9,31 @@ import {
   isCompanyAnalysisComplete,
 } from './analysisComplete.ts';
 import { hasUsableInvestmentConclusion } from './synthesizeConclusionPrompt.ts';
+import { indexAnsweredQuestions } from './qnaHelpers.ts';
 
 export const DEFAULT_FOLLOW_UP_QUESTION_COUNT = 8;
+
+/** Looser bar for follow-up — any saved report with thesis + conclusion prose is enough. */
+export const hasFollowUpMinimumContent = (company: CompanyAnalysis): boolean => {
+  if (!hasUsableInvestmentConclusion(company.conclusion)) return false;
+
+  const overall = (company.finalConclusion?.overall_conclusion || '').trim();
+  if (overall.length < 80) return false;
+
+  const bullets = company.finalConclusion?.bullet_points;
+  if (!Array.isArray(bullets) || bullets.length < 3) return false;
+
+  const questions = Array.isArray(company.questions) ? company.questions : [];
+  const qna = Array.isArray(company.qna) ? company.qna : [];
+
+  if (questions.length > 0 && qna.length > 0) {
+    const { pendingIndices } = indexAnsweredQuestions(questions, qna);
+    return pendingIndices.length === 0;
+  }
+
+  // Slim history list rows strip Q&A but keep thesis + conclusion.
+  return questions.length > 0 || Boolean(company.conclusion && company.finalConclusion);
+};
 
 export const extractFollowUpBaseline = (
   company: CompanyAnalysis,
@@ -44,6 +67,7 @@ export const isFollowUpEligibleCompany = (
   company: CompanyAnalysis
 ): boolean => {
   if (isCompanyAnalysisComplete(company)) return true;
+  if (hasFollowUpMinimumContent(company)) return true;
 
   const qna = Array.isArray(company.qna) ? company.qna : [];
   if (qna.length > 0) return false;

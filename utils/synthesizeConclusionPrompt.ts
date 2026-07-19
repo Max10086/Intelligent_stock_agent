@@ -1,5 +1,8 @@
 import { InvestmentConclusion } from '../types.ts';
 import { formatQnaForConclusion, formatQnaForSection } from './qnaTopicCompression.ts';
+import type { MaterialEvent } from './materialEventsExtract.ts';
+import { buildMaterialEventsPromptBlock } from './materialEventsExtract.ts';
+import type { Language } from '../types.ts';
 
 export interface SynthesizeConclusionQnA {
   question: string;
@@ -99,13 +102,13 @@ const SECTION_EXAMPLES_CN: Record<
   },
   ExpectationGap: {
     summary:
-      '市场仍将闪迪视为"周期Beta存储股"，对其在AI先进封装/HBF等硬科技叙事的定价几乎为零。预期差在于：332层BiCS10与HBF若于2026-H2完成Tier-1验证，估值框架或从周期商品倍数切换至AI基础设施溢价；当前78.4%毛利率与零长期债务提供罕见的安全垫，而100%产能预订与HBF样品进度构成3–6个月内可验证的唤醒催化剂。',
+      'Significant Gap Identified。市场仍将闪迪视为周期 Beta 存储股，对 HBF 硬科技叙事几乎零定价。若 332 层 BiCS10 与 HBF 于 2026-H2 完成 Tier-1 验证，估值有望从当前 commodity 倍数修复至 AI 基础设施溢价区间，对应约 25-35% 上涨空间。',
     evidence: [
-      '[刻板印象] 卖方普遍以NAND ASP周期与commodity倍数定价，对HBF/玻璃基板类硬科技optionality几乎未计价。',
-      '[隐蔽能力] 2026-02合资延期至2034+BiCS10路线图显示59%密度跃升，专利与产线转换进度领先市场认知。',
-      '[赛道共振] AI算力/先进封装对高带宽存储介质需求刚性，HBF样品2026-H2交付是切入数万亿TAM的关键验证节点。',
-      '[安全垫] 2026-Q1 FCF近30亿美元、零长期债务，即便新叙事延迟，下行空间有限。',
-      '[催化剂] 跟踪2026-H2 HBF客户Qual结果、BiCS10量产良率及Tier-1 CSP/design-in公告。',
+      '[验证节点] 2026-H2 HBF 客户 Qual 结果、BiCS10 量产良率及 Tier-1 design-in 公告为可验证 catalyst。',
+      '[量化空间] 若 multiples 从 commodity 周期框架修复至 AI 基础设施中枢，对应约 25-35% re-rating 空间。',
+      '[硬数据] 2026-Q1 非 GAAP 毛利率 78.4%，100% 可交付产能预订，HBF 样品 2026-H2 交付。',
+      '[共识差异] 卖方仍以 NAND ASP 周期定价，对 HBF optionality 几乎未计价。',
+      '[时间窗口] 2026-H2 为 3-6 个月内关键验证窗口。',
     ],
   },
 };
@@ -188,13 +191,13 @@ const SECTION_EXAMPLES_EN: Record<
   },
   ExpectationGap: {
     summary:
-      'The market still prices SanDisk as a cyclical NAND beta with near-zero credit for AI/advanced-packaging/HBF optionality. The bullish expectation gap: if 332-layer BiCS10 and HBF pass Tier-1 validation in 2026-H2, multiples could re-rate from commodity cycle to AI-infrastructure; 78.4% GM and zero net debt provide a rare floor while 100% bookings and HBF sampling are verifiable 3–6 month awakening catalysts.',
+      'Significant Gap Identified. The market still prices SanDisk as cyclical NAND beta with near-zero HBF credit. If BiCS10 and HBF pass Tier-1 validation in 2026-H2, multiples could repair from commodity cycle to AI-infrastructure median — roughly 25-35% upside.',
     evidence: [
-      '[Stereotype] Consensus uses NAND ASP cycle/commodity multiples; little value ascribed to HBF/hard-tech narrative.',
-      '[Hidden capability] Feb-2026 JV extension to 2034 + BiCS10 +59% density roadmap ahead of market perception.',
-      '[Theme resonance] AI compute/advanced packaging needs high-bandwidth memory media; 2026-H2 HBF samples are the TAM entry proof point.',
-      '[Safety floor] ~$3B quarterly FCF and zero long-term debt limit downside if narrative delays.',
-      '[Catalyst] Track 2026-H2 HBF qual results, BiCS10 yield ramp, Tier-1 CSP/design-in announcements.',
+      '[Verification] 2026-H2 HBF qual results, BiCS10 yield ramp, and Tier-1 design-in announcements are verifiable catalysts.',
+      '[Quantified upside] Multiple repair from commodity to AI-infrastructure median implies ~25-35% re-rating.',
+      '[Hard data] 2026-Q1 non-GAAP GM 78.4%; 100% deliverable capacity booked; HBF samples due 2026-H2.',
+      '[Consensus gap] Street still uses NAND ASP cycle multiples; little HBF optionality priced in.',
+      '[Time window] 2026-H2 is the critical 3-6 month validation window.',
     ],
   },
 };
@@ -237,8 +240,73 @@ const SECTION_GUIDES: Record<ThesisSectionKey, string> = {
   IndustryCycle:
     'cycle phase (trough/recovery/expansion/peak), utilization & ASP dynamics, capex/supply pipeline, company positioning vs peers in the cycle',
   ExpectationGap:
-    'market expectation gap vs current consensus: what the market still misprices or oversimplifies from today forward (next 3–6 months), near-term narrative correction, verifiable milestones/catalysts — synthesize ONLY from expectation-gap Q&A; do NOT rehash already-priced-in past-year events',
+    'ONLY from expectation-gap Q&A; forward 3-6 month mispricing vs consensus; do NOT rehash already-priced-in past events. BEFORE writing: assess the 3 expectation-gap Q&A answers — each must have hard data/dates, verifiable catalyst window, and explicit gap vs consensus. If 2+ answers are vague, lack data, or conclude "market already prices this in", set gap_assessment to "Limited"; otherwise "Significant".',
 };
+
+const EXPECTATION_GAP_JSON_EXAMPLE_CN = `{
+  "ExpectationGap": {
+    "gap_assessment": "Significant",
+    "summary": "Significant Gap Identified。...若 catalyst 兑现，估值有望从当前 X 倍修复至 Y 倍，对应 Z% 上涨空间。",
+    "evidence": [
+      "Q3 财报将于 2026-11-15 披露，可验证 XX 假设",
+      "...",
+      "...",
+      "..."
+    ]
+  }
+}`;
+
+const EXPECTATION_GAP_JSON_EXAMPLE_EN = `{
+  "ExpectationGap": {
+    "gap_assessment": "Significant",
+    "summary": "Significant Gap Identified. If catalysts land, multiples could repair from Xx to Yx (~Z% upside).",
+    "evidence": [
+      "Q3 earnings on 2026-11-15 can verify XX assumption",
+      "...",
+      "...",
+      "..."
+    ]
+  }
+}`;
+
+const buildExpectationGapSectionRules = (isChinese: boolean): string =>
+  isChinese
+    ? `
+对于 ExpectationGap 节，额外规则（必须遵守）：
+- 在生成 summary 前，先检查输入 Q&A 中 3 个预期差问题的答案质量
+- 每个答案须含：具体数据/日期、可验证 catalyst 时间窗口、与当前市场共识的明确差异
+- 若 2/3 或以上答案为空泛叙事、无硬数据、或结论为"市场定价已较充分/已充分反映"，则 gap_assessment 必须为 "Limited"
+- 若 3 个预期差问题均有硬数据支撑，则 gap_assessment 为 "Significant"
+
+若 gap_assessment 为 "Limited"（Limited Gap Identified）：
+- summary 必须明确说明："预期差有限，当前股价已反映大部分乐观预期"
+- evidence 须含当前 PE/PS 与历史中枢比较，说明估值是否已透支
+- 禁止在 summary 中构造"如果...则可能..."的假设性上涨叙事
+
+若 gap_assessment 为 "Significant"（Significant Gap Identified）：
+- summary 须量化上涨空间（如："若 catalyst 兑现，估值有望从当前 X 倍修复至 Y 倍，对应 Z% 上涨空间"）
+- evidence 须含具体验证节点（如："Q3 财报将于 YYYY-MM-DD 披露，可验证 XX 假设"）
+
+Required JSON shape（含 gap_assessment）：
+${EXPECTATION_GAP_JSON_EXAMPLE_CN}`
+    : `
+Extra rules for ExpectationGap (mandatory):
+- Before writing summary, assess quality of the 3 expectation-gap Q&A answers
+- Each answer must include: hard data/dates, verifiable catalyst window, explicit gap vs consensus
+- If 2+ answers are vague, lack data, or conclude "already priced in", gap_assessment MUST be "Limited"
+- If all 3 have hard-data support, gap_assessment is "Significant"
+
+If gap_assessment is "Limited" (Limited Gap Identified):
+- summary MUST state: "预期差有限，当前股价已反映大部分乐观预期" (or English equivalent)
+- evidence MUST include current PE/PS vs historical median showing whether valuation is stretched
+- Do NOT construct hypothetical "if...then upside..." narratives in summary
+
+If gap_assessment is "Significant" (Significant Gap Identified):
+- summary MUST quantify upside (e.g., "If catalysts land, multiples could repair from Xx to Yx (~Z% upside)")
+- evidence MUST include verification milestones (e.g., "Q3 earnings on YYYY-MM-DD verifies XX")
+
+Required JSON shape (with gap_assessment):
+${EXPECTATION_GAP_JSON_EXAMPLE_EN}`;
 
 export const buildSynthesizeConclusionPrompt = (
   companyName: string,
@@ -280,10 +348,9 @@ Section mapping guide:
 - ExpectationGap: ${SECTION_GUIDES.ExpectationGap}
 
 IMPORTANT — ExpectationGap section:
-- Must distill the three market expectation-gap research questions and their answers.
-- Focus on what consensus may still miss **from now forward** (next 3–6 months), not long-past events already priced in.
-- Explicitly contrast [current market framing] vs [near-term verifiable upside or correction].
-- Do NOT recycle generic consensus or rehash last year's news as if it were new alpha.
+- Must distill the three market expectation-gap research questions and their answers only.
+- Assess answer quality first; set gap_assessment to "Limited" or "Significant" per section guide.
+- Focus on forward 3–6 month mispricing; do NOT rehash priced-in past events.
 
 ${recencyGuidance}
 When evidence conflicts across years, prioritize the latest period and explain differences briefly.
@@ -306,23 +373,32 @@ export const buildSynthesizeSectionPrompt = (
   qna: SynthesizeConclusionQnA[],
   sectionKey: ThesisSectionKey,
   strictRetry = false,
-  marketContext?: string
+  marketContext?: string,
+  materialEvents: MaterialEvent[] = [],
+  lang: Language = /chinese/i.test(outputLanguage) ? 'cn' : 'en'
 ): string => {
   const isChinese = /chinese/i.test(outputLanguage);
   const examples = isChinese ? SECTION_EXAMPLES_CN : SECTION_EXAMPLES_EN;
   const example = examples[sectionKey];
   const writingRules = isChinese ? THESIS_WRITING_RULES_CN : THESIS_WRITING_RULES_EN;
-  const jsonExample = JSON.stringify(
-    {
-      [sectionKey]: {
-        summary: example.summary,
-        evidence: example.evidence,
-      },
-    },
-    null,
-    2
-  );
+  const isExpectationGap = sectionKey === 'ExpectationGap';
+  const jsonExample = isExpectationGap
+    ? isChinese
+      ? EXPECTATION_GAP_JSON_EXAMPLE_CN
+      : EXPECTATION_GAP_JSON_EXAMPLE_EN
+    : JSON.stringify(
+        {
+          [sectionKey]: {
+            summary: example.summary,
+            evidence: example.evidence,
+          },
+        },
+        null,
+        2
+      );
   const qnaPayload = formatQnaForSection(qna, sectionKey, 12, 2000);
+  const gapRules = isExpectationGap ? buildExpectationGapSectionRules(isChinese) : '';
+  const materialEventsBlock = buildMaterialEventsPromptBlock(materialEvents, sectionKey, lang);
 
   const base = `You are a senior investment analyst. Based on the Q&A below for "${companyName}", write ONLY the "${sectionKey}" section of an investment thesis in ${outputLanguage}.
 
@@ -330,14 +406,17 @@ HARD REQUIREMENTS (must follow exactly):
 - Return ONLY valid JSON. No markdown fences, no commentary, no extra keys.
 - Top-level key MUST be exactly "${sectionKey}".
 - "${sectionKey}" MUST contain "summary" AND "evidence" (array of 4-5 strings).
-- Each evidence item MUST cite specific numbers, dates, periods, or discrete facts from the Q&A.
+${isExpectationGap ? '- "ExpectationGap" MUST also contain "gap_assessment": "Limited" or "Significant".\n' : ''}- Each evidence item MUST cite specific numbers, dates, periods, or discrete facts from the Q&A.
 - Do NOT leave "evidence" empty.
 - Use facts for "${companyName}" only — the JSON example below shows desired depth/style, not content to copy.
 ${marketContext ? '- For stock price / valuation / sentiment at current levels, use the VERIFIED MARKET SNAPSHOT — reject stale pre-split or historical prices as "current".' : ''}
+${materialEventsBlock ? '- When MATERIAL EVENTS EXTRACT is provided below, you MUST incorporate every listed event (counterparty names and dates are mandatory).' : ''}
 
 ${writingRules}
 
 Focus for this section: ${SECTION_GUIDES[sectionKey]}
+${gapRules}
+${materialEventsBlock ? `\n${materialEventsBlock}\n` : ''}
 
 Required JSON shape (match this depth):
 ${jsonExample}
@@ -362,7 +441,18 @@ export const hasUsableInvestmentSection = (
   const summary = (section?.summary || '').trim();
   const evidence = Array.isArray(section?.evidence) ? section.evidence.filter(Boolean) : [];
   const minSummaryLength = 80;
-  return summary.length >= minSummaryLength && evidence.length >= minEvidence;
+  if (summary.length < minSummaryLength || evidence.length < minEvidence) return false;
+
+  if (sectionKey !== 'ExpectationGap') return true;
+
+  const gap = section?.gap_assessment;
+  if (gap !== 'Limited' && gap !== 'Significant') return false;
+
+  if (gap === 'Limited') {
+    return /Limited Gap Identified|预期差有限/.test(summary);
+  }
+
+  return /Significant Gap Identified|上涨空间|upside|re-rating|修复至/i.test(summary);
 };
 
 export const hasUsableInvestmentConclusion = (

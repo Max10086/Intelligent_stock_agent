@@ -55,6 +55,7 @@ class VertexAIClient {
       provider?: 'vertex' | 'deepseek' | 'doubao';
       step?: string;
       requireGoogleSearch?: boolean;
+      searchQueries?: string[];
       contents: any;
       config?: any;
     }): Promise<GenerateContentResponse> => {
@@ -76,6 +77,7 @@ class VertexAIClient {
           ...(params.provider ? { provider: params.provider } : {}),
           ...(params.step ? { step: params.step } : {}),
           ...(params.requireGoogleSearch ? { requireGoogleSearch: true } : {}),
+          ...(params.searchQueries?.length ? { searchQueries: params.searchQueries } : {}),
           contents: params.contents,
           config: params.config,
         });

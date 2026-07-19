@@ -559,6 +559,34 @@ export const getQuotePrice = async (
     }
 };
 
+/** Lightweight day change % from Tencent quote — no kline/Nasdaq history. */
+export const getQuoteDayChangePct = async (
+    basicProfile: Pick<CompanyProfile, 'ticker' | 'exchange'>
+): Promise<number | null> => {
+    const formattedTicker = formatTickerForTencent(basicProfile.ticker, basicProfile.exchange);
+    try {
+        const quoteRes = await fetchWithRetry(`https://qt.gtimg.cn/q=${formattedTicker}`);
+        if (!quoteRes.ok) return null;
+
+        const quoteText = await decodeTencentQuoteText(quoteRes);
+        if (!quoteText.includes('~') || quoteText.includes('v_pv_none_match=1')) return null;
+
+        const quoteData = quoteText.substring(quoteText.indexOf('"') + 1, quoteText.lastIndexOf('"'));
+        const parts = quoteData.split('~');
+        if (parts.length < 33) return null;
+
+        const pctStr = (parts[32] || '').trim();
+        const parsed = parseFloat(pctStr.replace(/[%+,]/g, ''));
+        return Number.isFinite(parsed) ? parsed : null;
+    } catch (error) {
+        console.warn(
+            `[getQuoteDayChangePct] Failed for ${basicProfile.ticker}:`,
+            error instanceof Error ? error.message : error
+        );
+        return null;
+    }
+};
+
 export const getFinancialData = async (
     basicProfile: Pick<CompanyProfile, 'name' | 'ticker' | 'exchange'>
 ): Promise<CompanyProfile> => {

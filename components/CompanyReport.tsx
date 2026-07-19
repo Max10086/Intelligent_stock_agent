@@ -12,6 +12,8 @@ import { sanitizeQuickTakeMarketCap } from '../utils/marketCapTextSanitize.ts';
 import type { ComparisonBaselineMode } from '../utils/analysisTimeline.ts';
 import { normalizeDisplayText, mergeBrokenEvidenceFragments } from '../utils/textNormalize.ts';
 import { THESIS_SECTION_KEYS } from '../utils/synthesizeConclusionPrompt.ts';
+import { classifyConclusion, getConclusionTagStyle } from '../utils/conclusionCategory.ts';
+import { extractOfficialRating } from '../utils/analysisComplete.ts';
 import { ChevronDownIcon, LinkIcon, LightBulbIcon, DocumentTextIcon, ChartBarIcon, BriefcaseIcon, ScaleIcon, ShieldExclamationIcon, StarIcon, CurrencyDollarIcon, BrainCircuitIcon, CalendarDaysIcon } from './icons.tsx';
 
 interface CompanyReportProps {
@@ -269,6 +271,60 @@ export const CompanyReport: React.FC<CompanyReportProps> = ({
     ? finalConclusion!.bullet_points
     : [];
 
+  const getRatingTextColor = (category: ReturnType<typeof classifyConclusion>): string => {
+    if (category === 'sell') return 'text-red-400';
+    if (category === 'strong_buy' || category === 'buy' || category === 'overweight') {
+      return 'text-green-400';
+    }
+    return 'text-blue-300';
+  };
+
+  const renderOverallConclusion = (text: string, conclusionForRating?: typeof finalConclusion) => {
+    const normalized = normalizeDisplayText(text);
+    if (!normalized) return <p className="text-gray-400">N/A</p>;
+
+    const ratingCategory = classifyConclusion(
+      extractOfficialRating(conclusionForRating || { overall_conclusion: text }) || text
+    );
+    const ratingColor = getRatingTextColor(ratingCategory);
+    const bodyColor = 'text-blue-300';
+
+    const leadMatch = normalized.match(/^(.+?[。.!？?])\s*(.*)$/s);
+    if (!leadMatch) {
+      return (
+        <p className={`text-lg font-bold ${bodyColor} leading-relaxed`}>{normalized}</p>
+      );
+    }
+
+    const [, lead, rest] = leadMatch;
+    const ratingPrefixMatch = lead.match(
+      /^((?:强烈买入|强力买入|买入|增持|卖出|减持|持有|Strong Buy|Buy|Overweight|Hold|Reduce|Sell)(?:[（(][^）)]+[）)])?)([。.!？?]?)([\s\S]*)$/i
+    );
+
+    const ratingSpan = ratingPrefixMatch ? (
+      <>
+        <span className={ratingColor}>
+          {ratingPrefixMatch[1]}
+          {ratingPrefixMatch[2]}
+        </span>
+        {ratingPrefixMatch[3]?.trim() ? (
+          <span className={bodyColor}>{ratingPrefixMatch[3].trim()}</span>
+        ) : null}
+      </>
+    ) : (
+      <span className={bodyColor}>{lead}</span>
+    );
+
+    return (
+      <>
+        <p className="text-xl font-bold leading-snug mb-3">{ratingSpan}</p>
+        {rest?.trim() ? (
+          <p className={`text-lg font-bold ${bodyColor} leading-relaxed`}>{rest.trim()}</p>
+        ) : null}
+      </>
+    );
+  };
+
   const formatPrice = (priceStr: string) => {
     if (!priceStr) return 'N/A';
     const price = parseFloat(priceStr);
@@ -333,6 +389,22 @@ export const CompanyReport: React.FC<CompanyReportProps> = ({
     ? formatPriceChangePct(comparisonBaseline.price, profile.currentPrice)
     : null;
   const livePrice = tracking?.currentPrice || profile.currentPrice;
+
+  const followUpBanner = canFollowUp && onFollowUp ? (
+    <div className="rounded-lg border border-amber-700/40 bg-amber-950/20 p-4 flex flex-wrap items-center justify-between gap-3">
+      <p className="text-sm text-amber-200">
+        {language === 'cn'
+          ? '股价与市场环境可能已变化，可基于上次报告发起跟进分析。'
+          : 'Price and market context may have changed. Start a follow-up from the prior report.'}
+      </p>
+      <button
+        onClick={onFollowUp}
+        className="px-4 py-2 rounded-md bg-amber-700 hover:bg-amber-600 text-white text-sm font-semibold shrink-0"
+      >
+        {uiText.followUpCompany}
+      </button>
+    </div>
+  ) : null;
 
   useEffect(() => {
     if (!reportId || !analysisTimestamp || !profile.currentPrice) return;
@@ -408,22 +480,6 @@ export const CompanyReport: React.FC<CompanyReportProps> = ({
           <p className="mt-2 text-gray-400">
             {language === 'cn' ? '正在分析候选公司…' : 'Analyzing candidate company…'}
           </p>
-        </div>
-      )}
-
-      {canFollowUp && onFollowUp && status === 'complete' && (
-        <div className="rounded-lg border border-amber-700/40 bg-amber-950/20 p-4 flex flex-wrap items-center justify-between gap-3">
-          <p className="text-sm text-amber-200">
-            {language === 'cn'
-              ? '股价与市场环境可能已变化，可基于上次报告发起跟进分析。'
-              : 'Price and market context may have changed. Start a follow-up from the prior report.'}
-          </p>
-          <button
-            onClick={onFollowUp}
-            className="px-4 py-2 rounded-md bg-amber-700 hover:bg-amber-600 text-white text-sm font-semibold"
-          >
-            {uiText.followUpCompany}
-          </button>
         </div>
       )}
 
@@ -549,7 +605,45 @@ export const CompanyReport: React.FC<CompanyReportProps> = ({
             <h3 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
                 <StarIcon className="w-6 h-6 text-amber-400" /> {uiText.finalConclusion}
             </h3>
-            <p className="mb-4 text-lg font-semibold text-blue-300 whitespace-pre-line">{normalizeDisplayText(finalConclusion.overall_conclusion) || 'N/A'}</p>
+            {finalConclusion.decision && (
+              <div className="mb-4 flex flex-wrap items-center gap-2">
+                {(() => {
+                  const ratingCategory = classifyConclusion(extractOfficialRating(finalConclusion) || finalConclusion.overall_conclusion);
+                  const ratingStyle = getConclusionTagStyle(ratingCategory);
+                  return (
+                    <span className={`px-2.5 py-1 rounded border text-sm font-medium ${ratingStyle.className}`}>
+                      {uiText[ratingStyle.labelKey]}
+                    </span>
+                  );
+                })()}
+                <span className="px-2.5 py-1 rounded border border-slate-500/40 bg-slate-700/40 text-slate-200 text-sm">
+                  {uiText.finalConclusionConfidence}: {finalConclusion.decision.confidence_score}/5
+                </span>
+                <span className="px-2.5 py-1 rounded border border-slate-500/40 bg-slate-700/40 text-slate-200 text-sm">
+                  {uiText.finalConclusionBearDownside}: {finalConclusion.decision.bear_case_downside}
+                </span>
+                {finalConclusion.decision.gap_assessment && (
+                  <span className={`px-2.5 py-1 rounded border text-sm ${
+                    finalConclusion.decision.gap_assessment === 'Limited'
+                      ? 'border-amber-500/40 bg-amber-500/10 text-amber-200'
+                      : 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200'
+                  }`}>
+                    {finalConclusion.decision.gap_assessment === 'Limited'
+                      ? uiText.finalConclusionGapLimited
+                      : uiText.finalConclusionGapSignificant}
+                  </span>
+                )}
+              </div>
+            )}
+            {finalConclusion.decision?.thesis_invalidation && (
+              <p className="mb-4 text-sm text-gray-400">
+                <span className="text-gray-500">{uiText.finalConclusionInvalidation}: </span>
+                {normalizeDisplayText(finalConclusion.decision.thesis_invalidation)}
+              </p>
+            )}
+            <div className="mb-5 rounded-lg border border-blue-500/35 bg-blue-950/45 p-5 shadow-inner">
+              {renderOverallConclusion(finalConclusion.overall_conclusion, finalConclusion)}
+            </div>
             {finalConclusion.vs_prior && (
               <div className="mb-4 rounded-md bg-gray-900/50 p-3 text-sm space-y-2">
                 {finalConclusion.vs_prior.prior_overall_conclusion && (
@@ -578,15 +672,18 @@ export const CompanyReport: React.FC<CompanyReportProps> = ({
                 )}
               </div>
             )}
-            <div className="space-y-4">
+            <div className="space-y-5">
+                <h4 className="text-sm font-semibold uppercase tracking-wide text-gray-400">
+                  {uiText.finalConclusionKeyArguments}
+                </h4>
                 {finalBulletPoints.map((point, index) => {
                     const evidenceList = mergeBrokenEvidenceFragments(
                       Array.isArray(point?.evidence) ? point.evidence.map(e => String(e || '')) : []
                     );
                     return (
-                    <div key={index} className="border-l-4 border-blue-500 pl-4">
-                        <p className="font-semibold text-gray-100">{normalizeDisplayText(point?.argument) || '-'}</p>
-                        <ul className="mt-2 pl-5 list-disc space-y-1 text-gray-400 text-sm">
+                    <div key={index} className="border-l-4 border-blue-500/80 pl-4">
+                        <p className="text-base font-semibold text-gray-50">{normalizeDisplayText(point?.argument) || '-'}</p>
+                        <ul className="mt-2 pl-5 list-disc space-y-1.5 text-gray-300 text-sm leading-relaxed">
                             {evidenceList.map((e, i) => <li key={i}>{normalizeDisplayText(e)}</li>)}
                         </ul>
                     </div>
@@ -594,6 +691,8 @@ export const CompanyReport: React.FC<CompanyReportProps> = ({
             </div>
         </section>
       )}
+
+      {followUpBanner}
 
       {conclusion && (
         <section>

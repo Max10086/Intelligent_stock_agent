@@ -3,6 +3,26 @@ import { THESIS_SECTION_KEYS } from './synthesizeConclusionPrompt.ts';
 import { formatTopicCompressedQnaDigest } from './qnaTopicCompression.ts';
 import { buildCompanyIdentityBlock, buildSearchDisambiguationBlock } from './companyIdentity.ts';
 import {
+  buildBearCaseAndRatingRequirements,
+  buildExpectationGapRatingRules,
+  buildFinalConclusionBulletRequirements,
+  buildOverallConclusionStyleRequirements,
+} from './finalConclusionPrompt.ts';
+
+const formatFollowUpThesisContext = (conclusion: InvestmentConclusion): Record<string, unknown> =>
+  Object.fromEntries(
+    THESIS_SECTION_KEYS.map(key => [
+      key,
+      {
+        ...(key === 'ExpectationGap' && conclusion[key]?.gap_assessment
+          ? { gap_assessment: conclusion[key]?.gap_assessment }
+          : {}),
+        summary: conclusion[key]?.summary || '',
+        evidence: conclusion[key]?.evidence || [],
+      },
+    ])
+  );
+import {
   formatBatchDedupHint,
   getCoverageSliceForBatch,
   getDimensionIndexRange,
@@ -284,79 +304,176 @@ export const buildFollowUpFinalConclusionPrompt = (
   recencyGuidance: string,
   baseline: FollowUpBaseline,
   conclusion: InvestmentConclusion,
-  qna: Array<{ question: string; answer: string }>
+  qna: Array<{ question: string; answer: string }>,
+  marketContext?: string,
+  materialEventsDigest?: string
 ): string => {
   const isChinese = /chinese/i.test(outputLanguage);
   const jsonExample = isChinese
     ? `{
-  "overall_conclusion": "谨慎买入。较上次「持有」上调评级。\\n\\n自上次分析以来锂价反弹与2026Q1毛利修复支撑 thesis，但估值已部分反映周期复苏；需跟踪2026H2产能投放与现金流改善是否兑现。",
+  "decision": {
+    "rating": "Overweight",
+    "confidence_score": 4,
+    "bear_case_downside": "15-25%",
+    "gap_assessment": "Limited",
+    "thesis_invalidation": "如果2026H2产能投放延迟或锂价在Q3跌破8万元/吨，本thesis将失效，建议立即重新评估",
+    "bear_case_conditions": [
+      "2026H2产能投放不及预期导致毛利率回落（较上次分析风险上升）",
+      "锂价反弹后下游补库放缓",
+      "同业扩产压制ASP"
+    ]
+  },
+  "overall_conclusion": "增持（预期差有限）。自上次「持有」分析以来，锂价反弹与2026Q1毛利修复显著改善风险收益比，当前PE TTM约XX倍、仍略高于历史中位但较3月高点已回落。2026H1净利润趋势与资源自给率提升支撑业绩反转 thesis，但估值已部分反映周期复苏，进一步上行需2026H2产能按计划投放。若H2验证节点落空，下行风险约15-25%；本评级自上次Hold上调至Overweight，主要基于业绩确定性改善而非预期差扩大。",
   "bullet_points": [
     {
-      "argument": "自上次分析以来锂价与毛利率改善",
-      "evidence": ["2026年5-6月碳酸锂现货反弹XX%", "2026Q1毛利率较2025Q4改善X个百分点"]
+      "argument": "Bear Case: 产能与价格双重压力",
+      "evidence": [
+        "2026H2 新产能若延迟，毛利率可能较 Q1 回落 X 个百分点",
+        "锂价若 Q3 跌破 XX 元/吨，盈利修复 thesis 失效"
+      ]
     },
     {
-      "argument": "估值仍高于历史中位但较峰值回落",
-      "evidence": ["当前PE TTM XX倍", "较2026年3月高点回落Y%"]
+      "argument": "Thesis 失效条件：H2 产能与锂价",
+      "evidence": [
+        "若 2026H2 产能投放低于指引 20%，growth thesis 失效",
+        "若 2026Q3 锂价较 5 月高点回落超 15%，margin thesis 失效"
+      ]
+    },
+    {
+      "argument": "估值安全边际：仍高于历史中位",
+      "evidence": [
+        "当前 PE TTM XX 倍 vs 历史中位 YY 倍",
+        "较 2026 年 3 月高点回落 Z%，但较上次分析价仍涨 A%"
+      ]
+    },
+    {
+      "argument": "预期差：周期复苏部分已计价",
+      "evidence": [
+        "ExpectationGap 节显示 re-rating 空间收窄",
+        "卖方 EPS 预测自上次分析以来已上调"
+      ]
+    },
+    {
+      "argument": "自上次分析以来锂价与毛利率改善",
+      "evidence": ["2026 年 5-6 月碳酸锂现货反弹 XX%", "2026Q1 毛利率较 2025Q4 改善 X 个百分点"]
+    },
+    {
+      "argument": "现金流改善仍待 H2 验证",
+      "evidence": ["2026Q1 经营现金流改善 XX%", "2026H2 Capex 高峰可能压制 FCF"]
+    },
+    {
+      "argument": "资源自给率提升强化成本优势",
+      "evidence": ["2026Q1 锂资源自给率较2025年提升", "外购锂盐成本占比下降"]
+    },
+    {
+      "argument": "行业供需格局支撑价格中枢",
+      "evidence": ["2026H1 下游补库带动锂价反弹", "同业扩产节奏放缓"]
     }
   ],
   "vs_prior": {
     "prior_overall_conclusion": "持有。周期底部承压但自有矿占比提升提供中期成本优势。",
     "rating_change": "upgrade",
-    "change_summary": "基本面边际改善且价格仍低于52周高点，风险收益比改善。"
+    "change_summary": "锂价反弹与 Q1 毛利修复改善风险收益比；Bear Case 下行仍可控，置信度 4/5 支持从 Hold 上调至 Overweight。"
   }
 }`
     : `{
-  "overall_conclusion": "Cautious Buy. Upgraded from prior Hold.\\n\\nMargin repair and lithium price rebound since the prior analysis support the thesis, but valuation partly prices in recovery; 2026H2 ramp and cash flow improvement must be verified.",
+  "decision": {
+    "rating": "Overweight",
+    "confidence_score": 4,
+    "bear_case_downside": "15-25%",
+    "gap_assessment": "Limited",
+    "thesis_invalidation": "If 2026H2 ramp slips or spot lithium falls below 80k/ton in Q3, this thesis fails — re-evaluate immediately",
+    "bear_case_conditions": [
+      "2026H2 ramp delay pressuring margins (risk increased since prior analysis)",
+      "Lithium rebound fading as downstream restocking slows",
+      "Peer expansion caps ASP"
+    ]
+  },
+  "overall_conclusion": "Overweight (limited expectation gap). Since the prior Hold rating, the lithium rebound and 2026Q1 margin repair have materially improved risk-reward; the stock trades at ~XXx TTM P/E, still slightly above the historical median but down from the March peak. 2026H1 earnings momentum and higher captive-mine share support the turnaround thesis, yet valuation partly prices in cyclical recovery — further upside needs on-schedule 2026H2 capacity ramp. If H2 milestones slip, downside is ~15-25%; this upgrade from Hold reflects improved earnings visibility, not a wider expectation gap.",
   "bullet_points": [
+    {
+      "argument": "Bear Case: capacity and price dual pressure",
+      "evidence": [
+        "2026H2 ramp delay could cut gross margin X pp vs Q1",
+        "Spot lithium below XX/ton in Q3 invalidates margin repair thesis"
+      ]
+    },
+    {
+      "argument": "Thesis invalidation: H2 ramp and lithium price",
+      "evidence": [
+        "If 2026H2 capacity <20% below guidance, growth thesis fails",
+        "If 2026Q3 lithium falls >15% from May peak, margin thesis fails"
+      ]
+    },
+    {
+      "argument": "Valuation margin of safety: still above historical median",
+      "evidence": [
+        "PE TTM XXx vs historical median YYx",
+        "Down Z% from Mar 2026 peak but up A% vs prior analysis price"
+      ]
+    },
+    {
+      "argument": "Expectation gap: partial recovery priced in",
+      "evidence": [
+        "ExpectationGap section shows narrower re-rating room",
+        "Street EPS estimates raised since prior analysis"
+      ]
+    },
     {
       "argument": "Lithium price and gross margin improved since prior analysis",
       "evidence": ["Spot lithium rebounded XX% between May-Jun 2026", "2026Q1 gross margin improved X pp vs 2025Q4"]
     },
     {
-      "argument": "Valuation remains above historical median but off recent peak",
-      "evidence": ["PE TTM now XXx", "Down Y% from Mar 2026 peak"]
+      "argument": "Cash flow improvement pending H2 verification",
+      "evidence": ["2026Q1 operating cash flow improved XX%", "2026H2 capex peak may pressure FCF"]
+    },
+    {
+      "argument": "Higher captive-mine share strengthens cost moat",
+      "evidence": ["2026Q1 captive lithium share rose vs 2025", "Purchased spodumene cost share declined"]
+    },
+    {
+      "argument": "Industry supply-demand supports price floor",
+      "evidence": ["2026H1 downstream restocking lifted spot lithium", "Peer expansion pace slowing"]
     }
   ],
   "vs_prior": {
     "prior_overall_conclusion": "Hold. Cycle trough pressure persists but captive mine share supports medium-term cost edge.",
     "rating_change": "upgrade",
-    "change_summary": "Fundamentals inflected positively while price remains below 52-week high; risk-reward improved."
+    "change_summary": "Lithium rebound and Q1 margin repair improved risk-reward; manageable Bear Case downside and 4/5 confidence support upgrade from Hold to Overweight."
   }
 }`;
 
-  const thesisContext = Object.fromEntries(
-    THESIS_SECTION_KEYS.map(key => [
-      key,
-      { summary: conclusion[key]?.summary || '', evidence: conclusion[key]?.evidence || [] },
-    ])
-  );
+  const thesisContext = formatFollowUpThesisContext(conclusion);
   const qnaDigest = formatTopicCompressedQnaDigest(qna, 800);
   const lang: Language = isChinese ? 'cn' : 'en';
+
+  const marketContextRule = marketContext
+    ? isChinese
+      ? '- 当前价格/估值：使用 VERIFIED MARKET SNAPSHOT ONLY — 禁止引用拆股前或陈旧网页价格作为当前价位。'
+      : '- For current price / valuation framing, use the VERIFIED MARKET SNAPSHOT ONLY — never cite pre-split or stale web prices as the current level.'
+    : '';
+
+  const bearCaseBlock = buildBearCaseAndRatingRequirements(isChinese, 'follow_up');
+  const overallStyleBlock = buildOverallConclusionStyleRequirements(isChinese);
+  const bulletBlock = buildFinalConclusionBulletRequirements(isChinese, marketContextRule, 'follow_up');
 
   const header = isChinese
     ? `你是资深投资分析师，请用简体中文为「${companyName}」撰写跟进投资结论。`
     : `You are a senior investment analyst writing a FOLLOW-UP investment conclusion for "${companyName}" in ${outputLanguage}.`;
 
-  const requirements = isChinese
-    ? `硬性要求：
-- 仅返回合法 JSON，不要 markdown 代码块。
-- "overall_conclusion" 须分两段，用 \\n\\n 分隔：(1) 相对上次的最新评级；(2) 3–5 句聚焦自上次分析以来变化的执行摘要。
-- "bullet_points" 须 5–7 条，聚焦自上次分析以来的变化；每条含 2–3 条证据字符串。
-- 必须包含 "vs_prior" 对象：
+  const gapRatingRules = buildExpectationGapRatingRules(isChinese);
+
+  const vsPriorBlock = isChinese
+    ? `- 必须包含 "vs_prior" 对象：
   - "prior_overall_conclusion"：复述/概括上方上次结论
-  - "rating_change"：upgrade / maintain / downgrade 之一
-  - "change_summary"：1–2 句说明评级变动或维持的原因
-- 结论须基于下方跟进投资论点。`
-    : `HARD REQUIREMENTS:
-- Return ONLY valid JSON. No markdown fences.
-- "overall_conclusion" MUST have TWO parts separated by \\n\\n: (1) one-sentence NEW rating vs prior, (2) 3-5 sentence executive summary focused on changes since prior analysis.
-- "bullet_points" MUST contain 5 to 7 items focused on changes since the prior analysis; each with 2-3 evidence strings.
-- MUST include "vs_prior" object with:
+  - "rating_change"：upgrade / maintain / downgrade 之一（相对上次矩阵评级）
+  - "change_summary"：1–2 句说明评级变动或维持的原因（须引用 Bear Case / 置信度变化）
+- 结论须基于下方跟进投资论点及上次 baseline。`
+    : `- MUST include "vs_prior" object with:
   - "prior_overall_conclusion": copy/summarize the prior conclusion above
-  - "rating_change": one of "upgrade", "maintain", "downgrade"
-  - "change_summary": 1-2 sentences explaining why the rating changed or stayed the same
-- Base the conclusion on the follow-up investment thesis below.`;
+  - "rating_change": one of "upgrade", "maintain", "downgrade" (vs prior matrix rating)
+  - "change_summary": 1-2 sentences explaining rating change or maintenance (cite Bear Case / confidence shifts)
+- Base the conclusion on the follow-up investment thesis and prior baseline below.`;
 
   const thesisLabel = isChinese ? '跟进投资论点：' : 'Follow-up investment thesis:';
   const qnaLabel = isChinese ? '主题压缩问答摘要：' : 'Topic-compressed Q&A digest:';
@@ -368,14 +485,21 @@ ${formatBaselineContext(baseline, lang)}
 
 ${recencyGuidance}
 
-${requirements}
+HARD REQUIREMENTS (must follow exactly):
+- Return ONLY valid JSON. No markdown fences, no commentary, no extra keys.
+${bearCaseBlock}
+${overallStyleBlock}
+${bulletBlock}
+${gapRatingRules}
+${vsPriorBlock}
 
 ${shapeLabel}
 ${jsonExample}
 
-${thesisLabel}
+${marketContext ? `${marketContext}\n\n` : ''}${thesisLabel}
 ${JSON.stringify(thesisContext)}
 
 ${qnaLabel}
-${JSON.stringify(qnaDigest)}`;
+${JSON.stringify(qnaDigest)}
+${materialEventsDigest ? `\n${materialEventsDigest}\n` : ''}`;
 };

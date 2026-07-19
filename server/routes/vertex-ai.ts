@@ -3,6 +3,7 @@ import { GoogleGenAI } from '@google/genai';
 import { getRuntimeModelConfig, setRuntimeModelConfig } from '../aiModelConfig.js';
 import { ModelClient, type ModelCallStep } from '../services/modelClient.js';
 import { requireAuth, requireAuthLite } from '../middleware/auth.js';
+import { createGoogleGenAIClient } from '../lib/googleGenAIClient.js';
 
 const router = express.Router();
 
@@ -14,18 +15,13 @@ let modelClient: ModelClient | null = null;
 function getAIClient(): GoogleGenAI {
     if (!aiClient) {
       try {
-        const projectId = process.env.GOOGLE_CLOUD_PROJECT || 'smartstockagent'; 
+        const projectId = process.env.GOOGLE_CLOUD_PROJECT || 'smartstockagent';
         const location = process.env.GOOGLE_CLOUD_LOCATION || 'global';
-  
+
         console.log(`🔌 Initializing Vertex AI with Project: ${projectId}, Location: ${location}`);
-  
-        // 2. 显式传入配置
-        aiClient = new GoogleGenAI({ 
-          vertexai: true,
-          project: projectId,   // <--- 关键修复：必须指定项目 ID
-          location: location    // <--- 关键修复：建议指定地区
-        });
-        
+
+        aiClient = createGoogleGenAIClient();
+
         console.log('✅ Vertex AI client initialized with Application Default Credentials');
       } catch (error) {
         console.error('❌ Failed to initialize Vertex AI client:', error);
@@ -50,13 +46,17 @@ function getModelClient(): ModelClient {
 // Proxy for Vertex AI generateContent requests
 router.post('/generate-content', requireAuth, async (req, res) => {
   try {
-    const { model, provider, contents, config, step, requireGoogleSearch } = req.body;
+    const { model, provider, contents, config, step, requireGoogleSearch, searchQueries } = req.body;
 
     if (!contents) {
       return res.status(400).json({
         error: 'Missing required field: contents is required'
       });
     }
+
+    const normalizedSearchQueries = Array.isArray(searchQueries)
+      ? searchQueries.filter((q: unknown) => typeof q === 'string' && q.trim()).map((q: string) => q.trim())
+      : undefined;
 
     const response = await getModelClient().generateContent({
       step: ((typeof step === 'string' && step) || 'custom') as ModelCallStep,
@@ -65,6 +65,7 @@ router.post('/generate-content', requireAuth, async (req, res) => {
       contents,
       config: config || {},
       requireGoogleSearch: Boolean(requireGoogleSearch),
+      searchQueries: normalizedSearchQueries?.length ? normalizedSearchQueries : undefined,
     });
 
     // Return the response in a format compatible with the frontend

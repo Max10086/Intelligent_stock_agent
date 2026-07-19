@@ -64,7 +64,11 @@ export type AnalyticsEventType =
   | 'paywall_dismissed'
   | 'subscription_activated'
   | 'subscription_cancelled'
-  | 'report_feedback';
+  | 'report_feedback'
+  | 'gainer_manual_analyze'
+  | 'gainer_auto_analyze'
+  | 'gainer_auto_analyze_skipped'
+  | 'gainer_manual_fetch';
 
 export type FeedbackCategory = 'bug' | 'feature' | 'quality' | 'pricing' | 'other';
 

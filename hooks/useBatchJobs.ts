@@ -4,6 +4,7 @@ import { apiFetch, getAuthToken, readApiError } from '../utils/authenticatedFetc
 
 const QUEUE_CACHE_KEY = 'intelligent-stock-agent:batch-queue-v1';
 const QUEUE_POLL_MS = 15000;
+const QUEUE_POLL_ACTIVE_MS = 5000;
 
 export interface QueueJobItem {
   id: string;
@@ -125,11 +126,43 @@ function mergeQueueJobs(incoming: QueueJobItem[], existing: QueueJobItem[]): Que
   }
   for (const job of incoming) {
     const prev = byId.get(job.id);
-    byId.set(job.id, prev ? { ...prev, ...job } : job);
+    byId.set(job.id, prev ? mergeQueueJobUpdate(prev, job) : job);
   }
   return Array.from(byId.values()).sort(
     (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
   );
+}
+
+/** Keep stable list fields when a stale poll returns nulls or regresses status. */
+function mergeQueueJobUpdate(prev: QueueJobItem, incoming: QueueJobItem): QueueJobItem {
+  const merged: QueueJobItem = { ...prev, ...incoming };
+
+  if (!incoming.overallConclusion?.trim() && prev.overallConclusion?.trim()) {
+    merged.overallConclusion = prev.overallConclusion;
+  }
+  if (!incoming.companyName?.trim() && prev.companyName?.trim()) {
+    merged.companyName = prev.companyName;
+  }
+  if (!incoming.currentPrice?.trim() && prev.currentPrice?.trim()) {
+    merged.currentPrice = prev.currentPrice;
+  }
+  if (!incoming.currency?.trim() && prev.currency?.trim()) {
+    merged.currency = prev.currency;
+  }
+
+  const statusRank: Record<QueueJobItem['status'], number> = {
+    PENDING: 0,
+    PROCESSING: 1,
+    FAILED: 2,
+    COMPLETED: 3,
+  };
+  if (statusRank[prev.status] > statusRank[incoming.status]) {
+    merged.status = prev.status;
+    merged.progress = Math.max(prev.progress ?? 0, incoming.progress ?? 0);
+    merged.completedAt = prev.completedAt ?? incoming.completedAt;
+  }
+
+  return merged;
 }
 
 function prependOptimisticJobs(
@@ -166,6 +199,8 @@ export const useBatchJobs = (options?: UseBatchJobsOptions) => {
   const [queueFetchError, setQueueFetchError] = useState<string | null>(null);
   const queueStatusRef = useRef(queueStatus);
   queueStatusRef.current = queueStatus;
+  const queueFetchGenerationRef = useRef(0);
+  const queueFetchInFlightRef = useRef(false);
 
   const applyQueueStatus = useCallback((next: QueueDashboardState) => {
     setQueueStatus(next);
@@ -176,8 +211,18 @@ export const useBatchJobs = (options?: UseBatchJobsOptions) => {
     if (!getAuthToken()) {
       return null;
     }
+    if (queueFetchInFlightRef.current) {
+      return queueStatusRef.current;
+    }
+
+    queueFetchInFlightRef.current = true;
+    const fetchGeneration = ++queueFetchGenerationRef.current;
+
     try {
       const response = await apiFetch('/api/jobs?limit=50');
+      if (fetchGeneration !== queueFetchGenerationRef.current) {
+        return null;
+      }
       if (response.status === 401) {
         setQueueFetchError(null);
         return null;
@@ -191,9 +236,16 @@ export const useBatchJobs = (options?: UseBatchJobsOptions) => {
         normalizeQueueJob(job)
       );
 
+      const prevJobs = queueStatusRef.current?.jobs ?? [];
+      const prevById = new Map(prevJobs.map(job => [job.id, job]));
+      const mergedJobs = transformedJobs.map(job => {
+        const prev = prevById.get(job.id);
+        return prev ? mergeQueueJobUpdate(prev, job) : job;
+      });
+
       const next: QueueDashboardState = {
-        jobs: transformedJobs,
-        total: data.total || transformedJobs.length,
+        jobs: mergedJobs,
+        total: data.total || mergedJobs.length,
         stats: data.stats || {
           pending: 0,
           processing: 0,
@@ -206,9 +258,15 @@ export const useBatchJobs = (options?: UseBatchJobsOptions) => {
       setQueueFetchError(null);
       return next;
     } catch (error) {
-      console.error('Error fetching queue status:', error);
-      setQueueFetchError(error instanceof Error ? error.message : 'Failed to load queue');
+      if (fetchGeneration === queueFetchGenerationRef.current) {
+        console.error('Error fetching queue status:', error);
+        setQueueFetchError(error instanceof Error ? error.message : 'Failed to load queue');
+      }
       throw error;
+    } finally {
+      if (fetchGeneration === queueFetchGenerationRef.current) {
+        queueFetchInFlightRef.current = false;
+      }
     }
   }, [applyQueueStatus]);
 
@@ -286,12 +344,32 @@ export const useBatchJobs = (options?: UseBatchJobsOptions) => {
 
     void fetchQueueStatus();
 
-    const interval = window.setInterval(() => {
-      if (document.visibilityState === 'hidden') return;
-      void fetchQueueStatus();
-    }, QUEUE_POLL_MS);
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
 
-    return () => window.clearInterval(interval);
+    const scheduleNextPoll = () => {
+      const stats = queueStatusRef.current?.stats;
+      const hasActiveJobs = Boolean(stats && (stats.pending > 0 || stats.processing > 0));
+      const delay = hasActiveJobs ? QUEUE_POLL_ACTIVE_MS : QUEUE_POLL_MS;
+      timer = window.setTimeout(async () => {
+        if (cancelled) return;
+        if (document.visibilityState !== 'hidden') {
+          try {
+            await fetchQueueStatus();
+          } catch {
+            // fetchQueueStatus already logs / sets queueFetchError
+          }
+        }
+        scheduleNextPoll();
+      }, delay);
+    };
+
+    scheduleNextPoll();
+
+    return () => {
+      cancelled = true;
+      if (timer) window.clearTimeout(timer);
+    };
   }, [queuePollingEnabled, fetchQueueStatus]);
 
   const retryFailedJob = useCallback(

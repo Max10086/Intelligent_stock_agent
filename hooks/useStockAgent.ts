@@ -7,8 +7,9 @@ import { Type } from '@google/genai';
 import { AnalysisState, CompanyAnalysis, CompanyProfile, Language, QnAResult, GroundingSource, InvestmentConclusion, FinalConclusion, LlmTelemetryEntry, RuntimeModelConfig, SearchProvider, FollowUpBaseline, FollowUpMeta } from '../types.ts';
 import { getUIText } from '../constants.ts';
 import { cleanupBrokenNumericFormatting, mergeBrokenEvidenceFragments } from '../utils/textNormalize.ts';
-import { buildFinalConclusionPrompt, buildFinalConclusionStrictRetrySuffix } from '../utils/finalConclusionPrompt.ts';
+import { buildFinalConclusionPrompt, buildFinalConclusionStrictRetrySuffix, buildFollowUpFinalConclusionStrictRetrySuffix, FINAL_CONCLUSION_RESPONSE_SCHEMA } from '../utils/finalConclusionPrompt.ts';
 import { normalizeInvestmentConclusion } from '../utils/investmentConclusionNormalize.ts';
+import { normalizeFinalConclusion } from '../utils/finalConclusionNormalize.ts';
 import { parseModelJsonResponse } from '../utils/modelJson.ts';
 import {
   hasUsableInvestmentConclusion,
@@ -38,6 +39,7 @@ import {
 } from '../utils/companyDiscovery.ts';
 import {
   findIncompleteCompanies,
+  getFinalConclusionQualityIssues,
   hasUsableFinalConclusion,
   isCandidateAwaitingUser,
   isCompanyAnalysisComplete,
@@ -53,14 +55,26 @@ import {
   buildQuickTakeIdentityRule,
   detectWrongCompanyMix,
 } from '../utils/companyIdentity.ts';
-import { buildAnswerQuestionPrompt, buildVerifiedMarketContext } from '../utils/marketSnapshot.ts';
+import { buildVerifiedMarketContext } from '../utils/marketSnapshot.ts';
+import {
+  applyStrategicEventAnswerRetries,
+  buildAnswerPromptForQuestion,
+  resolveStrategicEventSearchQueries,
+} from '../utils/strategicEventsAnswer.ts';
 import { pickLanguageValidQuestions } from '../utils/questionLanguage.ts';
 import {
   buildExpectationGapQuestionsPrompt,
   EXPECTATION_GAP_QUESTION_COUNT,
   getCoreQuestionCount,
 } from '../utils/expectationGapPrompt.ts';
-import { mergeCoreAndExpectationGapQuestions } from '../utils/mergeQuestionSets.ts';
+import { getFollowUpCoreQuestionCount } from '../utils/questionCounts.ts';
+import { mergeAllResearchQuestions, mergeFollowUpResearchQuestions } from '../utils/mergeQuestionSets.ts';
+import { buildStrategicEventsQuestions, buildFollowUpStrategicEventsQuestions } from '../utils/strategicEventsPrompt.ts';
+import {
+  buildMaterialEventsDigestForFinalConclusion,
+  extractMaterialEventsFromQna,
+  type MaterialEvent,
+} from '../utils/materialEventsExtract.ts';
 import {
   DEFAULT_FOLLOW_UP_QUESTION_COUNT,
   buildFollowUpQueryLabel,
@@ -68,7 +82,6 @@ import {
   getFollowUpEligibleCompanies,
 } from '../utils/followUpHelpers.ts';
 import {
-  buildFollowUpAnswerPrompt,
   buildFollowUpFinalConclusionPrompt,
   buildFollowUpPriorContextBlock,
   buildFollowUpQuestionsPrompt,
@@ -172,64 +185,6 @@ const normalizeEvidenceList = (value: any): string[] => {
     return single ? [single] : [];
   }
   return [];
-};
-
-const normalizeFinalBulletPoint = (point: any) => {
-  if (typeof point === 'string') {
-    return { argument: point.trim(), evidence: [] as string[] };
-  }
-  return {
-    argument: cleanupBrokenNumericFormatting(getFirstString(point, ['argument', 'claim', 'point', 'thesis', 'summary'])),
-    evidence: normalizeEvidenceList(
-      point?.evidence ??
-        point?.supporting_evidence ??
-        point?.supportingEvidence ??
-        point?.data_points ??
-        point?.dataPoints ??
-        point?.facts ??
-        point?.proof
-    ),
-  };
-};
-
-const normalizeFinalConclusion = (raw: any): FinalConclusion => {
-  const bulletRaw =
-    raw?.bullet_points ??
-    raw?.bulletPoints ??
-    raw?.key_points ??
-    raw?.keyPoints ??
-    raw?.points ??
-    raw?.arguments ??
-    [];
-  const bulletPoints = Array.isArray(bulletRaw)
-    ? bulletRaw.map(normalizeFinalBulletPoint)
-    : normalizeEvidenceList(bulletRaw).map(text => ({ argument: text, evidence: [] as string[] }));
-
-  return {
-    overall_conclusion: cleanupBrokenNumericFormatting(getFirstString(raw, [
-      'overall_conclusion',
-      'overallConclusion',
-      'conclusion',
-      'recommendation',
-      'verdict',
-    ])),
-    bullet_points: bulletPoints.filter(point => point.argument || point.evidence.length > 0),
-    vs_prior: raw?.vs_prior
-      ? {
-          prior_overall_conclusion: cleanupBrokenNumericFormatting(
-            getFirstString(raw.vs_prior, ['prior_overall_conclusion', 'priorOverallConclusion', 'prior_conclusion'])
-          ),
-          rating_change: (['upgrade', 'maintain', 'downgrade', 'unknown'] as const).includes(
-            raw.vs_prior?.rating_change
-          )
-            ? raw.vs_prior.rating_change
-            : undefined,
-          change_summary: cleanupBrokenNumericFormatting(
-            getFirstString(raw.vs_prior, ['change_summary', 'changeSummary', 'summary'])
-          ),
-        }
-      : undefined,
-  };
 };
 
 const createInitialState = (): AnalysisState => ({
@@ -1148,8 +1103,60 @@ export const useStockAgent = (options: UseStockAgentOptions = {}) => {
     );
 
     const gapQuestions = await generateExpectationGapQuestions(company, lang);
-    return mergeCoreAndExpectationGapQuestions(standardQuestions, gapQuestions, questionCount);
+    const strategicQuestions = buildStrategicEventsQuestions(company, lang);
+    return mergeAllResearchQuestions(standardQuestions, strategicQuestions, gapQuestions, questionCount);
   };
+
+  const extractMaterialEvents = async (
+    company: CompanyProfile,
+    qna: QnAResult[],
+    lang: Language,
+    step: 'extract_material_events' | 'follow_up_extract_material_events' = 'extract_material_events'
+  ): Promise<MaterialEvent[]> =>
+    extractMaterialEventsFromQna({
+      companyName: company.name,
+      lang,
+      qna: qna.map(item => ({
+        question: item.question,
+        answer: item.answer,
+        sources: item.sources,
+      })),
+      callModel: async prompt => {
+        const startedAt = Date.now();
+        const response = await ai.models.generateContent({
+          provider: runtimeModelConfig.analysis.provider,
+          model: runtimeModelConfig.analysis.model,
+          step,
+          contents: { role: 'user', parts: [{ text: prompt }] },
+          config: {
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                events: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      date: { type: Type.STRING },
+                      headline: { type: Type.STRING },
+                      partners: { type: Type.ARRAY, items: { type: Type.STRING } },
+                      category: { type: Type.STRING },
+                      status: { type: Type.STRING },
+                      investment_relevance: { type: Type.STRING },
+                    },
+                    required: ['headline', 'category', 'status', 'investment_relevance'],
+                  },
+                },
+              },
+              required: ['events'],
+            },
+          },
+        });
+        appendTelemetry(step, startedAt, response);
+        return response.text || '{}';
+      },
+    });
 
   const generateFollowUpQuestions = async (
     company: Pick<CompanyProfile, 'name' | 'ticker' | 'exchange'>,
@@ -1160,6 +1167,7 @@ export const useStockAgent = (options: UseStockAgentOptions = {}) => {
     const outputLanguage = lang === 'cn' ? 'Simplified Chinese' : 'English';
     const now = new Date();
     const recencyGuidance = buildFollowUpRecencyGuidance(followUpContext.parentTimestamp, now, lang);
+    const coreCount = getFollowUpCoreQuestionCount(questionCount);
 
     const callBatch = async (
       batchSize: number,
@@ -1202,8 +1210,8 @@ export const useStockAgent = (options: UseStockAgentOptions = {}) => {
       return (Array.isArray(parsed.questions) ? parsed.questions : []).slice(0, batchSize);
     };
 
-    return generateQuestionsInBatches(
-      questionCount,
+    const followUpQuestions = await generateQuestionsInBatches(
+      coreCount,
       async (batchSize, batchIndex, batchTotal, priorQuestionCount) => {
         const raw = await callBatch(batchSize, batchIndex, batchTotal, priorQuestionCount, false);
         return pickLanguageValidQuestions(raw, lang, () =>
@@ -1223,6 +1231,14 @@ export const useStockAgent = (options: UseStockAgentOptions = {}) => {
         },
       }
     );
+
+    const strategicQuestions = buildFollowUpStrategicEventsQuestions(
+      company,
+      lang,
+      followUpContext.parentTimestamp,
+      now
+    );
+    return mergeFollowUpResearchQuestions(followUpQuestions, strategicQuestions, questionCount);
   };
 
   const answerQuestion = async (
@@ -1232,13 +1248,14 @@ export const useStockAgent = (options: UseStockAgentOptions = {}) => {
   ): Promise<QnAResult> => {
     const outputLanguage = lang === 'cn' ? 'Simplified Chinese' : 'English';
     const now = new Date();
-    const basePrompt = buildAnswerQuestionPrompt(
+    const basePrompt = buildAnswerPromptForQuestion({
       question,
-      company,
+      profile: company,
       outputLanguage,
-      buildRecencyGuidance(now, lang),
-      lang
-    );
+      recencyGuidance: buildRecencyGuidance(now, lang),
+      lang,
+    });
+    const searchQueries = resolveStrategicEventSearchQueries(question, company, lang);
 
     const callSearch = async (prompt: string, step: 'answer_question' | 'follow_up_answer_question') => {
       const startedAt = Date.now();
@@ -1247,6 +1264,7 @@ export const useStockAgent = (options: UseStockAgentOptions = {}) => {
         model: runtimeModelConfig.search.model,
         step,
         requireGoogleSearch: true,
+        searchQueries,
         contents: { role: 'user', parts: [{ text: prompt }] },
         config: {
           tools: [{ googleSearch: {} }],
@@ -1268,6 +1286,15 @@ export const useStockAgent = (options: UseStockAgentOptions = {}) => {
           : 'Search returned no usable evidence for this question; retrying.'
       );
     }
+
+    ({ answer, sources } = await applyStrategicEventAnswerRetries({
+      question,
+      company,
+      lang,
+      basePrompt,
+      initial: { answer, sources },
+      callSearch: prompt => callSearch(prompt, 'answer_question'),
+    }));
 
     const mixCheck = detectWrongCompanyMix(answer, company);
     if (mixCheck.mixed) {
@@ -1296,15 +1323,15 @@ export const useStockAgent = (options: UseStockAgentOptions = {}) => {
     const outputLanguage = lang === 'cn' ? 'Simplified Chinese' : 'English';
     const now = new Date();
     const recencyGuidance = buildFollowUpRecencyGuidance(followUpContext.parentTimestamp, now, lang);
-    const basePrompt = `${buildVerifiedMarketContext(company, lang)}
-
-${buildFollowUpAnswerPrompt(
+    const basePrompt = buildAnswerPromptForQuestion({
       question,
-      company,
+      profile: company,
       outputLanguage,
       recencyGuidance,
-      followUpContext.baseline
-    )}`;
+      lang,
+      followUpBaseline: followUpContext.baseline,
+    });
+    const searchQueries = resolveStrategicEventSearchQueries(question, company, lang);
 
     const callSearch = async (prompt: string) => {
       const startedAt = Date.now();
@@ -1313,6 +1340,7 @@ ${buildFollowUpAnswerPrompt(
         model: runtimeModelConfig.search.model,
         step: 'follow_up_answer_question',
         requireGoogleSearch: true,
+        searchQueries,
         contents: { role: 'user', parts: [{ text: prompt }] },
         config: {
           tools: [{ googleSearch: {} }],
@@ -1335,6 +1363,15 @@ ${buildFollowUpAnswerPrompt(
       );
     }
 
+    ({ answer, sources } = await applyStrategicEventAnswerRetries({
+      question,
+      company,
+      lang,
+      basePrompt,
+      initial: { answer, sources },
+      callSearch,
+    }));
+
     const mixCheck = detectWrongCompanyMix(answer, company);
     if (mixCheck.mixed) {
       console.warn(
@@ -1355,17 +1392,31 @@ ${buildFollowUpAnswerPrompt(
   const synthesizeConclusion = async (
     company: CompanyProfile,
     qna: QnAResult[],
-    lang: Language
+    lang: Language,
+    materialEvents?: MaterialEvent[]
   ): Promise<InvestmentConclusion> => {
     const outputLanguage = lang === 'cn' ? 'Simplified Chinese' : 'English';
     const marketContext = buildVerifiedMarketContext(company, lang);
-    const conclusionSectionSchema = {
-      type: Type.OBJECT,
-      properties: {
-        summary: { type: Type.STRING },
-        evidence: { type: Type.ARRAY, items: { type: Type.STRING } },
-      },
-      required: ['summary', 'evidence'],
+    const buildSectionSchema = (sectionKey: ThesisSectionKey) => {
+      if (sectionKey === 'ExpectationGap') {
+        return {
+          type: Type.OBJECT,
+          properties: {
+            gap_assessment: { type: Type.STRING },
+            summary: { type: Type.STRING },
+            evidence: { type: Type.ARRAY, items: { type: Type.STRING } },
+          },
+          required: ['gap_assessment', 'summary', 'evidence'],
+        };
+      }
+      return {
+        type: Type.OBJECT,
+        properties: {
+          summary: { type: Type.STRING },
+          evidence: { type: Type.ARRAY, items: { type: Type.STRING } },
+        },
+        required: ['summary', 'evidence'],
+      };
     };
 
     const qnaPayload = qna.map(item => ({
@@ -1374,12 +1425,18 @@ ${buildFollowUpAnswerPrompt(
       sources: item.sources,
     }));
 
+    const events =
+      materialEvents ??
+      (await extractMaterialEvents(company, qna, lang, 'extract_material_events'));
+
     return synthesizeInvestmentConclusionBySections({
       companyName: company.name,
       outputLanguage,
       recencyGuidance: buildRecencyGuidance(new Date(), lang),
       qna: qnaPayload,
       marketContext,
+      materialEvents: events,
+      lang,
       callSection: async (sectionKey: ThesisSectionKey, prompt: string) => {
         const startedAt = Date.now();
         const response = await ai.models.generateContent({
@@ -1392,7 +1449,7 @@ ${buildFollowUpAnswerPrompt(
             responseSchema: {
               type: Type.OBJECT,
               properties: {
-                [sectionKey]: conclusionSectionSchema,
+                [sectionKey]: buildSectionSchema(sectionKey),
               },
               required: [sectionKey],
             },
@@ -1409,7 +1466,8 @@ ${buildFollowUpAnswerPrompt(
     company: CompanyProfile,
     qna: QnAResult[],
     lang: Language,
-    followUpContext: FollowUpRunContext
+    followUpContext: FollowUpRunContext,
+    materialEvents?: MaterialEvent[]
   ): Promise<InvestmentConclusion> => {
     const outputLanguage = lang === 'cn' ? 'Simplified Chinese' : 'English';
     const marketContext = buildVerifiedMarketContext(company, lang);
@@ -1417,13 +1475,26 @@ ${buildFollowUpAnswerPrompt(
 
 ${buildFollowUpPriorContextBlock(followUpContext.baseline, followUpContext.priorConclusion, lang)}`;
 
-    const conclusionSectionSchema = {
-      type: Type.OBJECT,
-      properties: {
-        summary: { type: Type.STRING },
-        evidence: { type: Type.ARRAY, items: { type: Type.STRING } },
-      },
-      required: ['summary', 'evidence'],
+    const buildSectionSchema = (sectionKey: ThesisSectionKey) => {
+      if (sectionKey === 'ExpectationGap') {
+        return {
+          type: Type.OBJECT,
+          properties: {
+            gap_assessment: { type: Type.STRING },
+            summary: { type: Type.STRING },
+            evidence: { type: Type.ARRAY, items: { type: Type.STRING } },
+          },
+          required: ['gap_assessment', 'summary', 'evidence'],
+        };
+      }
+      return {
+        type: Type.OBJECT,
+        properties: {
+          summary: { type: Type.STRING },
+          evidence: { type: Type.ARRAY, items: { type: Type.STRING } },
+        },
+        required: ['summary', 'evidence'],
+      };
     };
     const qnaPayload = qna.map(item => ({
       question: item.question,
@@ -1431,12 +1502,18 @@ ${buildFollowUpPriorContextBlock(followUpContext.baseline, followUpContext.prior
       sources: item.sources,
     }));
 
+    const events =
+      materialEvents ??
+      (await extractMaterialEvents(company, qna, lang, 'follow_up_extract_material_events'));
+
     return synthesizeInvestmentConclusionBySections({
       companyName: company.name,
       outputLanguage,
       recencyGuidance,
       qna: qnaPayload,
       marketContext,
+      materialEvents: events,
+      lang,
       callSection: async (sectionKey: ThesisSectionKey, prompt: string) => {
         const startedAt = Date.now();
         const response = await ai.models.generateContent({
@@ -1449,7 +1526,7 @@ ${buildFollowUpPriorContextBlock(followUpContext.baseline, followUpContext.prior
             responseSchema: {
               type: Type.OBJECT,
               properties: {
-                [sectionKey]: conclusionSectionSchema,
+                [sectionKey]: buildSectionSchema(sectionKey),
               },
               required: [sectionKey],
             },
@@ -1466,60 +1543,52 @@ ${buildFollowUpPriorContextBlock(followUpContext.baseline, followUpContext.prior
     company: CompanyProfile,
     qna: QnAResult[],
     conclusion: InvestmentConclusion,
-    lang: Language
+    lang: Language,
+    materialEvents?: MaterialEvent[]
   ): Promise<FinalConclusion> => {
     const outputLanguage = lang === 'cn' ? 'Simplified Chinese' : 'English';
     const marketContext = buildVerifiedMarketContext(company, lang);
+    const events =
+      materialEvents ??
+      (await extractMaterialEvents(company, qna, lang, 'extract_material_events'));
+    const materialEventsDigest = buildMaterialEventsDigestForFinalConclusion(events, lang);
     
     const finalConclusionSchema = {
-        type: Type.OBJECT,
-        properties: {
-            overall_conclusion: { 
-                type: Type.STRING,
-                description: `Rating plus 3-5 sentence executive summary for ${company.name}.`
-            },
-            bullet_points: {
-                type: Type.ARRAY,
-                items: {
-                    type: Type.OBJECT,
-                    properties: {
-                        argument: { 
-                            type: Type.STRING,
-                            description: 'A single, key investment argument (pro or con).'
-                        },
-                        evidence: {
-                            type: Type.ARRAY,
-                            items: { type: Type.STRING },
-                            description: 'A list of specific data points or facts from the Q&A that support the argument.'
-                        }
-                    },
-                    required: ['argument', 'evidence']
-                }
-            }
+      ...FINAL_CONCLUSION_RESPONSE_SCHEMA,
+      properties: {
+        ...FINAL_CONCLUSION_RESPONSE_SCHEMA.properties,
+        overall_conclusion: {
+          type: Type.STRING,
+          description: `Clean sell-side executive summary prose for ${company.name}. No section headers.`,
         },
-        required: ['overall_conclusion', 'bullet_points']
+      },
     };
 
-    const buildPrompt = (strict: boolean) => {
+    const qualityOptions = {
+      gapAssessment: conclusion.ExpectationGap?.gap_assessment ?? null,
+    };
+
+    const buildPrompt = (strict: boolean, qualityIssues: string[] = []) => {
       const base = buildFinalConclusionPrompt(
         company.name,
         outputLanguage,
         buildRecencyGuidance(new Date(), lang),
         conclusion,
         qna.map(item => ({ question: item.question, answer: item.answer, sources: item.sources })),
-        marketContext
+        marketContext,
+        materialEventsDigest
       );
       if (!strict) return base;
-      return `${base}\n\n${buildFinalConclusionStrictRetrySuffix()}`;
+      return `${base}\n\n${buildFinalConclusionStrictRetrySuffix(qualityIssues)}`;
     };
 
-    const callModel = async (strict: boolean) => {
+    const callModel = async (strict: boolean, qualityIssues: string[] = []) => {
       const startedAt = Date.now();
       const response = await ai.models.generateContent({
         provider: runtimeModelConfig.analysis.provider,
         model: runtimeModelConfig.analysis.model,
         step: 'final_conclusion',
-        contents: { role: 'user', parts: [{ text: buildPrompt(strict) }] },
+        contents: { role: 'user', parts: [{ text: buildPrompt(strict, qualityIssues) }] },
         config: {
           responseMimeType: 'application/json',
           responseSchema: finalConclusionSchema,
@@ -1530,10 +1599,16 @@ ${buildFollowUpPriorContextBlock(followUpContext.baseline, followUpContext.prior
     };
 
     let finalConclusion = await callModel(false);
-    if (!hasUsableFinalConclusion(finalConclusion)) {
-      finalConclusion = await callModel(true);
+    let qualityIssues = getFinalConclusionQualityIssues(finalConclusion, qualityOptions);
+    if (qualityIssues.length > 0) {
+      finalConclusion = await callModel(true, qualityIssues);
+      qualityIssues = getFinalConclusionQualityIssues(finalConclusion, qualityOptions);
     }
-    if (!hasUsableFinalConclusion(finalConclusion)) {
+    if (qualityIssues.length > 0) {
+      finalConclusion = await callModel(true, qualityIssues);
+      qualityIssues = getFinalConclusionQualityIssues(finalConclusion, qualityOptions);
+    }
+    if (!hasUsableFinalConclusion(finalConclusion, qualityOptions)) {
       throw new Error(`Failed to generate a usable final investment conclusion for ${company.name}.`);
     }
     return finalConclusion;
@@ -1544,36 +1619,43 @@ ${buildFollowUpPriorContextBlock(followUpContext.baseline, followUpContext.prior
     qna: QnAResult[],
     conclusion: InvestmentConclusion,
     lang: Language,
-    followUpContext: FollowUpRunContext
+    followUpContext: FollowUpRunContext,
+    materialEvents?: MaterialEvent[]
   ): Promise<FinalConclusion> => {
     const outputLanguage = lang === 'cn' ? 'Simplified Chinese' : 'English';
     const recencyGuidance = buildFollowUpRecencyGuidance(followUpContext.parentTimestamp, new Date(), lang);
     const marketContext = buildVerifiedMarketContext(company, lang);
+    const events =
+      materialEvents ??
+      (await extractMaterialEvents(company, qna, lang, 'follow_up_extract_material_events'));
+    const materialEventsDigest = buildMaterialEventsDigestForFinalConclusion(events, lang);
 
-    const buildPrompt = (strict: boolean) => {
-      const base = `${marketContext}
+    const qualityOptions = {
+      gapAssessment: conclusion.ExpectationGap?.gap_assessment ?? null,
+    };
 
-${buildFollowUpFinalConclusionPrompt(
+    const buildPrompt = (strict: boolean, qualityIssues: string[] = []) => {
+      const base = buildFollowUpFinalConclusionPrompt(
         company.name,
         outputLanguage,
         recencyGuidance,
         followUpContext.baseline,
         conclusion,
-        qna.map(item => ({ question: item.question, answer: item.answer }))
-      )}`;
+        qna.map(item => ({ question: item.question, answer: item.answer })),
+        marketContext,
+        materialEventsDigest
+      );
       if (!strict) return base;
-      return `${base}
-
-CRITICAL RETRY: Include valid "vs_prior" with rating_change (upgrade/maintain/downgrade) and 3-5 bullet_points.`;
+      return `${base}\n\n${buildFollowUpFinalConclusionStrictRetrySuffix(qualityIssues)}`;
     };
 
-    const callModel = async (strict: boolean) => {
+    const callModel = async (strict: boolean, qualityIssues: string[] = []) => {
       const startedAt = Date.now();
       const response = await ai.models.generateContent({
         provider: runtimeModelConfig.analysis.provider,
         model: runtimeModelConfig.analysis.model,
         step: 'follow_up_final_conclusion',
-        contents: { role: 'user', parts: [{ text: buildPrompt(strict) }] },
+        contents: { role: 'user', parts: [{ text: buildPrompt(strict, qualityIssues) }] },
         config: {
           responseMimeType: 'application/json',
         },
@@ -1583,10 +1665,16 @@ CRITICAL RETRY: Include valid "vs_prior" with rating_change (upgrade/maintain/do
     };
 
     let finalConclusion = await callModel(false);
-    if (!hasUsableFinalConclusion(finalConclusion)) {
-      finalConclusion = await callModel(true);
+    let qualityIssues = getFinalConclusionQualityIssues(finalConclusion, qualityOptions);
+    if (qualityIssues.length > 0) {
+      finalConclusion = await callModel(true, qualityIssues);
+      qualityIssues = getFinalConclusionQualityIssues(finalConclusion, qualityOptions);
     }
-    if (!hasUsableFinalConclusion(finalConclusion)) {
+    if (qualityIssues.length > 0) {
+      finalConclusion = await callModel(true, qualityIssues);
+      qualityIssues = getFinalConclusionQualityIssues(finalConclusion, qualityOptions);
+    }
+    if (!hasUsableFinalConclusion(finalConclusion, qualityOptions)) {
       throw new Error(`Failed to generate a usable follow-up conclusion for ${company.name}.`);
     }
     return finalConclusion;
@@ -1825,9 +1913,17 @@ ${buildQuickTakeIdentityRule(company, lang)}`;
       }
 
       let conclusion = existingConclusion;
+      let materialEvents: MaterialEvent[] | undefined;
+
       if (!conclusion) {
         updateState({ currentStage: uiText.synthesizingReport, currentProgress: 75 });
         updateCompanyState(companyId, { status: 'synthesizing' });
+        materialEvents = await extractMaterialEvents(
+          company,
+          qnaResults,
+          lang,
+          isFollowUp ? 'follow_up_extract_material_events' : 'extract_material_events'
+        );
         conclusion = await runWithStepLog(
           companyId,
           company.name,
@@ -1835,8 +1931,8 @@ ${buildQuickTakeIdentityRule(company, lang)}`;
           lang,
           () =>
             isFollowUp && followUpContext
-              ? synthesizeFollowUpConclusion(company, qnaResults, lang, followUpContext)
-              : synthesizeConclusion(company, qnaResults, lang)
+              ? synthesizeFollowUpConclusion(company, qnaResults, lang, followUpContext, materialEvents)
+              : synthesizeConclusion(company, qnaResults, lang, materialEvents)
         );
         updateCompanyState(companyId, { conclusion });
         await delay(200);
@@ -1847,6 +1943,14 @@ ${buildQuickTakeIdentityRule(company, lang)}`;
       let finalConclusion = existingFinalConclusion;
       if (!finalConclusion) {
         updateState({ currentStage: uiText.generatingFinalConclusion, currentProgress: 90 });
+        materialEvents =
+          materialEvents ??
+          (await extractMaterialEvents(
+            company,
+            qnaResults,
+            lang,
+            isFollowUp ? 'follow_up_extract_material_events' : 'extract_material_events'
+          ));
         finalConclusion = await runWithStepLog(
           companyId,
           company.name,
@@ -1859,9 +1963,10 @@ ${buildQuickTakeIdentityRule(company, lang)}`;
                   qnaResults,
                   conclusion!,
                   lang,
-                  followUpContext
+                  followUpContext,
+                  materialEvents
                 )
-              : generateFinalConclusion(company, qnaResults, conclusion!, lang)
+              : generateFinalConclusion(company, qnaResults, conclusion!, lang, materialEvents)
         );
       }
       updateCompanyState(companyId, { finalConclusion, status: 'complete' });

@@ -292,3 +292,57 @@ export const setRuntimeModelConfig = (override: RuntimeOverride) => {
   return getRuntimeModelConfig();
 };
 
+export type GainerUsDailySource = 'yahoo' | 'model';
+
+export interface GainerModelConfig {
+  us: { provider: ModelProvider; model: string; useGoogleSearch: boolean };
+  cn: { provider: 'deepseek'; model: string; useSearch: boolean };
+}
+
+export interface GainerUsBlurbConfig {
+  provider: 'deepseek';
+  model: string;
+}
+
+const resolveGainerUsDailySource = (): GainerUsDailySource => {
+  const explicit = (process.env.GAINER_US_DAILY_SOURCE || '').trim().toLowerCase();
+  if (explicit === 'model' || explicit === 'vertex' || explicit === 'gemini') {
+    return 'model';
+  }
+  return 'yahoo';
+};
+
+export const getGainerUsDailySource = (): GainerUsDailySource => resolveGainerUsDailySource();
+
+export const getGainerUsBlurbConfig = (): GainerUsBlurbConfig => ({
+  provider: 'deepseek',
+  model:
+    (process.env.GAINER_US_BLURB_MODEL && process.env.GAINER_US_BLURB_MODEL.trim()) ||
+    'deepseek-v4-flash',
+});
+
+const resolveGainerUsProvider = (): ModelProvider => {
+  const explicit = (process.env.GAINER_US_PROVIDER || '').trim().toLowerCase();
+  if (explicit === 'vertex' || explicit === 'deepseek') {
+    return explicit;
+  }
+  return 'vertex';
+};
+
+export const getGainerModelConfig = (): GainerModelConfig => ({
+  us: {
+    provider: resolveGainerUsProvider(),
+    model:
+      (process.env.GAINER_US_MODEL && process.env.GAINER_US_MODEL.trim()) ||
+      'gemini-3.1-flash-lite',
+      useGoogleSearch: process.env.GAINER_US_USE_GOOGLE_SEARCH !== 'false',
+  },
+  cn: {
+    provider: 'deepseek',
+    model:
+      (process.env.GAINER_CN_MODEL && process.env.GAINER_CN_MODEL.trim()) ||
+      'deepseek-v4-flash',
+    useSearch: process.env.GAINER_CN_USE_SEARCH !== 'false',
+  },
+});
+

@@ -2,6 +2,8 @@ import express from 'express';
 import { prisma } from '../db.js';
 import { JobStatus } from '@prisma/client';
 import { addToQueue, getQueueStatus, getJobById, retryFailedJob } from '../actions/queue.js';
+import { listAnalysisCatalog } from '../services/analysisCatalogService.js';
+import { computeCatalogReturns } from '../services/catalogReturnService.js';
 import { startQueueProcessing, resetStaleProcessingJobs } from '../actions/process.js';
 import { assertCanAnalyzeCompanies, UsageLimitError } from '../services/usageLimit.js';
 import { trackUserEvent } from '../services/analytics.js';
@@ -181,6 +183,69 @@ router.post('/:id/retry', async (req, res) => {
     const message = error?.message || 'Failed to retry job';
     const status = /not found/i.test(message) ? 404 : /only failed/i.test(message) ? 400 : 500;
     res.status(status).json({ error: message });
+  }
+});
+
+// GET /api/jobs/catalog - Completed analyses grouped by conclusion (for browse page)
+router.get('/catalog', async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit as string, 10);
+    const offset = parseInt(req.query.offset as string, 10);
+    const includeTotal = req.query.includeTotal === 'true';
+    const catalog = await listAnalysisCatalog(req.user!.id, {
+      limit: Number.isFinite(limit) ? limit : 60,
+      offset: Number.isFinite(offset) ? offset : 0,
+      includeTotal,
+    });
+    res.json(catalog);
+  } catch (error: any) {
+    console.error('Error listing analysis catalog:', error);
+    if (!res.headersSent) {
+      res.status(500).json({
+        error: 'Failed to list analysis catalog',
+        details: process.env.NODE_ENV === 'development' ? error.message : undefined,
+      });
+    }
+  }
+});
+
+// POST /api/jobs/catalog/returns - Live cumulative return vs analysis-day baseline price
+router.post('/catalog/returns', async (req, res) => {
+  try {
+    const rawItems = Array.isArray(req.body?.items) ? req.body.items : [];
+    const items = rawItems
+      .map((row: unknown) => {
+        if (!row || typeof row !== 'object') return null;
+        const item = row as Record<string, unknown>;
+        const id = String(item.id || '').trim();
+        const ticker = String(item.ticker || '').trim();
+        const exchange = String(item.exchange || 'NASDAQ').trim() || 'NASDAQ';
+        const anchorPrice = String(item.anchorPrice || '').trim();
+        const companyName = String(item.companyName || '').trim() || null;
+        if (!id || !ticker || !anchorPrice) return null;
+        return { id, ticker, exchange, anchorPrice, companyName };
+      })
+      .filter(Boolean)
+      .slice(0, 12) as Array<{
+      id: string;
+      ticker: string;
+      exchange: string;
+      anchorPrice: string;
+      companyName: string | null;
+    }>;
+
+    if (items.length === 0) {
+      return res.json({ results: [] });
+    }
+
+    const results = await computeCatalogReturns(items);
+    res.json({ results });
+  } catch (error: unknown) {
+    console.error('Error computing catalog returns:', error);
+    res.status(500).json({
+      error: 'Failed to compute catalog returns',
+      details: process.env.NODE_ENV === 'development' && error instanceof Error ? error.message : undefined,
+    });
   }
 });
 
