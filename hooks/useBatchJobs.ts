@@ -345,7 +345,7 @@ export const useBatchJobs = (options?: UseBatchJobsOptions) => {
     void fetchQueueStatus();
 
     let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    let timer: number | undefined;
 
     const scheduleNextPoll = () => {
       const stats = queueStatusRef.current?.stats;

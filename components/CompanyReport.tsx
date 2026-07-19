@@ -284,7 +284,7 @@ export const CompanyReport: React.FC<CompanyReportProps> = ({
     if (!normalized) return <p className="text-gray-400">N/A</p>;
 
     const ratingCategory = classifyConclusion(
-      extractOfficialRating(conclusionForRating || { overall_conclusion: text }) || text
+      extractOfficialRating(conclusionForRating ?? text) || text
     );
     const ratingColor = getRatingTextColor(ratingCategory);
     const bodyColor = 'text-blue-300';

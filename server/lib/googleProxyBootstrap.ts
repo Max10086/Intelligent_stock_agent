@@ -81,7 +81,7 @@ const shouldUseGoogleProxy = (input: RequestInfo | URL): boolean => {
 /** Patch Gaxios so google-auth-library ADC / token refresh uses SOCKS. */
 const patchGaxiosForGoogleSocks = (agent: SocksProxyAgent): void => {
   const originalRequest = Gaxios.prototype.request;
-  Gaxios.prototype.request = function patchedGaxiosRequest(
+  const patchedRequest = function patchedGaxiosRequest(
     this: Gaxios,
     opts: Parameters<Gaxios['request']>[0]
   ) {
@@ -100,6 +100,7 @@ const patchGaxiosForGoogleSocks = (agent: SocksProxyAgent): void => {
     }
     return originalRequest.call(this, opts);
   };
+  Gaxios.prototype.request = patchedRequest as typeof Gaxios.prototype.request;
 };
 
 /** Vertex / Gemini client options (SOCKS applied globally via fetch + Gaxios patches). */

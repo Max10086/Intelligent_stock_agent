@@ -293,7 +293,7 @@ export const refreshMarketGainers = async (params: {
   force?: boolean;
   /** When false (default), skip quote/ticker validation for faster fetch. */
   validateQuotes?: boolean;
-}): Promise<{ snapshotId: string; status: string }> => {
+}): Promise<{ snapshotId: string; status: string; entryCount?: number }> => {
   const { market, period, modelClient, validateQuotes = false } = params;
   if (market === 'HK') {
     throw new Error('HK gainer fetch is reserved for a future release');
