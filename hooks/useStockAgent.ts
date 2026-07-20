@@ -3,6 +3,9 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import { flushSync } from 'react-dom';
 import { ai } from '../services/gemini.ts';
 import { getFinancialData, searchTicker } from '../services/finance.ts';
+import { fetchCninfoEvidenceBlock } from '../services/cninfo.ts';
+import { fetchEdgarEvidenceBlock } from '../services/edgar.ts';
+import { mergeOfficialFilingEvidenceBlocks } from '../utils/officialFilingEvidence.ts';
 import { Type } from '@google/genai';
 import { AnalysisState, CompanyAnalysis, CompanyProfile, Language, QnAResult, GroundingSource, InvestmentConclusion, FinalConclusion, LlmTelemetryEntry, RuntimeModelConfig, SearchProvider, FollowUpBaseline, FollowUpMeta } from '../types.ts';
 import { getUIText } from '../constants.ts';
@@ -11,6 +14,7 @@ import { buildFinalConclusionPrompt, buildFinalConclusionStrictRetrySuffix, buil
 import { normalizeInvestmentConclusion } from '../utils/investmentConclusionNormalize.ts';
 import { normalizeFinalConclusion } from '../utils/finalConclusionNormalize.ts';
 import { parseModelJsonResponse } from '../utils/modelJson.ts';
+import { normalizeQuestionList } from '../utils/coerceQuestionText.ts';
 import {
   hasUsableInvestmentConclusion,
   THESIS_SECTION_KEYS,
@@ -112,7 +116,6 @@ const API_BASE_URL = typeof window !== 'undefined' ? '' : 'http://localhost:3001
 const HISTORY_FETCH_TIMEOUT_MS = 45000;
 const REPORT_FETCH_TIMEOUT_MS = 120000;
 const HISTORY_PAGE_SIZE = 20;
-const HISTORY_MAX_ITEMS = 100;
 const HISTORY_FIRST_PAGE_TIMEOUT_MS = 45000;
 const HISTORY_CACHE_VERSION = 2;
 
@@ -445,7 +448,7 @@ export const useStockAgent = (options: UseStockAgentOptions = {}) => {
         let total: number | null = null;
         let firstPage = true;
 
-        while (hasMore && offset < HISTORY_MAX_ITEMS) {
+        while (hasMore) {
           try {
             const page = await fetchPage(
               pageSize,
@@ -1017,8 +1020,8 @@ export const useStockAgent = (options: UseStockAgentOptions = {}) => {
         },
       });
       appendTelemetry('question_generation', startedAt, response);
-      const parsed = parseModelJsonResponse(response.text || '{}') as { questions?: string[] };
-      return (Array.isArray(parsed.questions) ? parsed.questions : []).slice(
+      const parsed = parseModelJsonResponse(response.text || '{}') as { questions?: unknown };
+      return normalizeQuestionList(parsed.questions).slice(
         0,
         EXPECTATION_GAP_QUESTION_COUNT
       );
@@ -1076,8 +1079,8 @@ export const useStockAgent = (options: UseStockAgentOptions = {}) => {
         },
       });
       appendTelemetry('question_generation', startedAt, response);
-      const parsed = parseModelJsonResponse(response.text || '{}') as { questions?: string[] };
-      return (Array.isArray(parsed.questions) ? parsed.questions : []).slice(0, batchSize);
+      const parsed = parseModelJsonResponse(response.text || '{}') as { questions?: unknown };
+      return normalizeQuestionList(parsed.questions).slice(0, batchSize);
     };
 
     const standardQuestions = await generateQuestionsInBatches(
@@ -1206,8 +1209,8 @@ export const useStockAgent = (options: UseStockAgentOptions = {}) => {
       });
       appendTelemetry('follow_up_question_generation', startedAt, response);
 
-      const parsed = parseModelJsonResponse(response.text || '{}') as { questions?: string[] };
-      return (Array.isArray(parsed.questions) ? parsed.questions : []).slice(0, batchSize);
+      const parsed = parseModelJsonResponse(response.text || '{}') as { questions?: unknown };
+      return normalizeQuestionList(parsed.questions).slice(0, batchSize);
     };
 
     const followUpQuestions = await generateQuestionsInBatches(
@@ -1244,7 +1247,8 @@ export const useStockAgent = (options: UseStockAgentOptions = {}) => {
   const answerQuestion = async (
     question: string,
     company: CompanyProfile,
-    lang: Language
+    lang: Language,
+    officialFilingEvidenceBlock?: string
   ): Promise<QnAResult> => {
     const outputLanguage = lang === 'cn' ? 'Simplified Chinese' : 'English';
     const now = new Date();
@@ -1254,6 +1258,7 @@ export const useStockAgent = (options: UseStockAgentOptions = {}) => {
       outputLanguage,
       recencyGuidance: buildRecencyGuidance(now, lang),
       lang,
+      officialFilingEvidenceBlock,
     });
     const searchQueries = resolveStrategicEventSearchQueries(question, company, lang);
 
@@ -1318,7 +1323,8 @@ export const useStockAgent = (options: UseStockAgentOptions = {}) => {
     question: string,
     company: CompanyProfile,
     lang: Language,
-    followUpContext: FollowUpRunContext
+    followUpContext: FollowUpRunContext,
+    officialFilingEvidenceBlock?: string
   ): Promise<QnAResult> => {
     const outputLanguage = lang === 'cn' ? 'Simplified Chinese' : 'English';
     const now = new Date();
@@ -1330,6 +1336,7 @@ export const useStockAgent = (options: UseStockAgentOptions = {}) => {
       recencyGuidance,
       lang,
       followUpBaseline: followUpContext.baseline,
+      officialFilingEvidenceBlock,
     });
     const searchQueries = resolveStrategicEventSearchQueries(question, company, lang);
 
@@ -1836,6 +1843,25 @@ ${buildQuickTakeIdentityRule(company, lang)}`;
       reportQnaProgress(completedCount, 'initial');
 
       if (pendingIndices.length > 0) {
+        let officialFilingEvidenceBlock = '';
+        try {
+          const [cninfoBlock, edgarBlock] = await Promise.all([
+            fetchCninfoEvidenceBlock(company, lang),
+            fetchEdgarEvidenceBlock(company, lang),
+          ]);
+          officialFilingEvidenceBlock = mergeOfficialFilingEvidenceBlocks(cninfoBlock, edgarBlock);
+          if (officialFilingEvidenceBlock) {
+            updateState({
+              currentStage:
+                lang === 'cn'
+                  ? `${company.name}：已加载法定披露原文，开始答题…`
+                  : `${company.name}: Official filing excerpts loaded — answering questions…`,
+            });
+          }
+        } catch (error) {
+          console.warn('[filings] Prefetch skipped:', error);
+        }
+
         const pendingTasks = pendingIndices.map(index => ({
           index,
           item: questions[index],
@@ -1851,8 +1877,8 @@ ${buildQuickTakeIdentityRule(company, lang)}`;
                 questionPreview: task.item.slice(0, 80),
               });
               return isFollowUp && followUpContext
-                ? answerFollowUpQuestion(task.item, company, lang, followUpContext)
-                : answerQuestion(task.item, company, lang);
+                ? answerFollowUpQuestion(task.item, company, lang, followUpContext, officialFilingEvidenceBlock)
+                : answerQuestion(task.item, company, lang, officialFilingEvidenceBlock);
             },
             {
               concurrency: QNA_CONCURRENCY,

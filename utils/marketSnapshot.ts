@@ -69,22 +69,27 @@ export const buildAnswerQuestionPrompt = (
   >,
   outputLanguage: string,
   recencyGuidance: string,
-  lang: Language
+  lang: Language,
+  officialFilingEvidenceBlock?: string
 ): string => {
   const marketContext = buildVerifiedMarketContext(profile, lang);
   const disambiguation = buildSearchDisambiguationBlock(profile, lang);
   const searchHints = buildSuggestedSearchQueries(profile);
+  const filingBlock = officialFilingEvidenceBlock?.trim()
+    ? `\n\n${officialFilingEvidenceBlock.trim()}\n`
+    : '';
   const isChinese = lang === 'cn';
 
   if (isChinese) {
     return `${marketContext}
-
+${filingBlock}
 ${disambiguation}
 
 作为金融分析师，请用简体中文回答关于「${profile.name}」（${profile.ticker} / ${profile.exchange}）的以下问题：「${question}」
 ${recencyGuidance}
 回答要求：
 - 涉及股价/估值时，以「系统已验证行情快照」为当前价基准；搜索中的冲突价格须标注为历史并注明日期。
+- 涉及财报与经营数据时，若上方有法定披露原文（巨潮/SEC EDGAR），必须优先引用原文数字并标注报告期。
 - 搜索时请使用含交易所的查询，例如：${searchHints.slice(0, 3).join('；')}。
 - 优先使用最新可得数据，旧数据仅作对比参考。
 - 若无法获取最新披露/期间数据，须明确说明限制。
@@ -93,13 +98,14 @@ ${recencyGuidance}
   }
 
   return `${marketContext}
-
+${filingBlock}
 ${disambiguation}
 
 As a financial analyst, answer this question about "${profile.name}" (${profile.ticker} / ${profile.exchange}) in ${outputLanguage}: "${question}".
 ${recencyGuidance}
 Answer requirements:
 - For price/valuation, anchor on the VERIFIED MARKET SNAPSHOT; conflicting search prices must be labeled historical with dates.
+- For financial and operating metrics, if official filing excerpts (CNINFO / SEC EDGAR) are provided above, cite those figures first with explicit periods.
 - Prefer search queries that include the exchange, e.g.: ${searchHints.slice(0, 3).join('; ')}.
 - Use freshest available data first; older data is secondary context only.
 - If the latest filing/period is unavailable, clearly disclose that limitation.

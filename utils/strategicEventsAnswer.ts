@@ -224,12 +224,13 @@ export const buildAnswerPromptForQuestion = (options: {
   recencyGuidance: string;
   lang: Language;
   followUpBaseline?: FollowUpBaseline;
+  officialFilingEvidenceBlock?: string;
 }): string => {
   const kind = classifyStrategicEventQuestion(options.question);
   if (!kind) {
     if (options.followUpBaseline) {
       return `${buildVerifiedMarketContext(options.profile, options.lang)}
-
+${options.officialFilingEvidenceBlock?.trim() ? `\n\n${options.officialFilingEvidenceBlock.trim()}\n` : ''}
 ${buildFollowUpAnswerPrompt(
   options.question,
   options.profile,
@@ -243,7 +244,8 @@ ${buildFollowUpAnswerPrompt(
       options.profile,
       options.outputLanguage,
       options.recencyGuidance,
-      options.lang
+      options.lang,
+      options.officialFilingEvidenceBlock
     );
   }
   return buildStrategicEventAnswerPrompt({ ...options, kind });

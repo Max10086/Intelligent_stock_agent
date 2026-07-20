@@ -150,16 +150,19 @@ function mergeQueueJobUpdate(prev: QueueJobItem, incoming: QueueJobItem): QueueJ
     merged.currency = prev.currency;
   }
 
-  const statusRank: Record<QueueJobItem['status'], number> = {
-    PENDING: 0,
-    PROCESSING: 1,
-    FAILED: 2,
-    COMPLETED: 3,
-  };
-  if (statusRank[prev.status] > statusRank[incoming.status]) {
+  // Completed is terminal — ignore stale polls that show in-progress states.
+  if (prev.status === 'COMPLETED' && incoming.status !== 'COMPLETED') {
     merged.status = prev.status;
     merged.progress = Math.max(prev.progress ?? 0, incoming.progress ?? 0);
     merged.completedAt = prev.completedAt ?? incoming.completedAt;
+  } else if (prev.status === 'PROCESSING' && incoming.status === 'PENDING') {
+    // Ignore stale poll showing queued while worker is still running.
+    merged.status = prev.status;
+    merged.progress = Math.max(prev.progress ?? 0, incoming.progress ?? 0);
+  } else if (prev.status === 'FAILED' && incoming.status === 'PENDING') {
+    // Retry clears error; accept the fresh queued state.
+    merged.error = incoming.error ?? null;
+    merged.completedAt = incoming.completedAt ?? null;
   }
 
   return merged;
@@ -374,8 +377,34 @@ export const useBatchJobs = (options?: UseBatchJobsOptions) => {
 
   const retryFailedJob = useCallback(
     async (jobId: string) => {
+      setQueueStatus(prev => {
+        if (!prev) return prev;
+        const job = prev.jobs.find(j => j.id === jobId);
+        if (!job || job.status !== 'FAILED') return prev;
+
+        const jobs = prev.jobs.map(j =>
+          j.id === jobId
+            ? {
+                ...j,
+                status: 'PENDING' as const,
+                error: null,
+                completedAt: null,
+                currentStep: j.hasCheckpoint ? 'Queued — resume from checkpoint' : 'Queued for retry',
+              }
+            : j
+        );
+        const stats = { ...prev.stats };
+        stats.failed = Math.max(0, stats.failed - 1);
+        stats.pending += 1;
+
+        const next = { ...prev, jobs, stats };
+        writeQueueCache(next);
+        return next;
+      });
+
       const response = await apiFetch(`/api/jobs/${jobId}/retry`, { method: 'POST' });
       if (!response.ok) {
+        await fetchQueueStatus();
         throw new Error(await parseErrorResponse(response));
       }
       setIsPolling(true);

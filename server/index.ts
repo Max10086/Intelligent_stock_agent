@@ -16,6 +16,8 @@ import { analyticsRouter } from './routes/analytics.js';
 import { adminRouter } from './routes/admin.js';
 import { feedbackRouter } from './routes/feedback.js';
 import { marketGainersRouter, marketGainersRefreshRouter } from './routes/marketGainers.js';
+import { cninfoRouter } from './routes/cninfo.js';
+import { edgarRouter } from './routes/edgar.js';
 import { requireAuth } from './middleware/auth.js';
 import { startQueueWorker, stopQueueWorker } from './worker.js';
 import { resetStalledJobs } from './actions/process.js';
@@ -145,6 +147,8 @@ app.use('/api/jobs', requireAuth, jobsRouter);
 app.use('/api/history', historyRouter);
 app.use('/api/compare', compareRouter);
 app.use('/api/return-tracking', returnTrackingRouter);
+app.use('/api/cninfo', cninfoRouter);
+app.use('/api/edgar', edgarRouter);
 
 // --- 2. 托管前端静态文件 ---
 const distPath = path.join(__dirname, '../dist');

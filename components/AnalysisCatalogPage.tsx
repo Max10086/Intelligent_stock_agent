@@ -12,6 +12,13 @@ import {
   getConclusionTagStyle,
   type ConclusionCategory,
 } from '../utils/conclusionCategory.ts';
+import { downloadTextFile } from '../utils/downloadTextFile.ts';
+import {
+  buildCategoryTxtFilename,
+  buildReportTxtFilename,
+  formatAnalysisStateAsText,
+  formatCategoryReportsAsText,
+} from '../utils/reportTextExport.ts';
 import { BrandMark } from './BrandMark.tsx';
 import { ArrowPathIcon } from './icons.tsx';
 
@@ -209,6 +216,9 @@ export const AnalysisCatalogPage: React.FC<AnalysisCatalogPageProps> = ({
     () => storedCategory ?? defaultCategory
   );
   const [loadingReportId, setLoadingReportId] = useState<string | null>(null);
+  const [downloadingReportId, setDownloadingReportId] = useState<string | null>(null);
+  const [downloadingCategory, setDownloadingCategory] = useState(false);
+  const [categoryDownloadProgress, setCategoryDownloadProgress] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const hasSetInitialCategory = useRef(false);
 
@@ -228,24 +238,31 @@ export const AnalysisCatalogPage: React.FC<AnalysisCatalogPageProps> = ({
     [userId]
   );
 
+  const activeItems = groupedByCategory[activeCategory];
+
+  const fetchAnalysisReport = useCallback(
+    async (id: string): Promise<AnalysisState> => {
+      const response = await apiFetch(`/api/jobs/${id}`);
+      if (!response.ok) {
+        throw new Error(uiText.batchLoadReportError);
+      }
+      const data = await response.json();
+      if (!data.result) {
+        throw new Error(uiText.batchEmptyReport);
+      }
+      return { ...(data.result as AnalysisState), id };
+    },
+    [uiText]
+  );
+
   const handleLoadReport = useCallback(
     async (item: AnalysisCatalogItem) => {
       if (!onLoadReport) return;
       setLoadingReportId(item.id);
       setLoadError(null);
       try {
-        const response = await apiFetch(`/api/jobs/${item.id}`);
-        if (!response.ok) {
-          throw new Error(uiText.batchLoadReportError);
-        }
-        const data = await response.json();
-        if (!data.result) {
-          throw new Error(uiText.batchEmptyReport);
-        }
-        onLoadReport({
-          id: item.id,
-          result: { ...(data.result as AnalysisState), id: item.id },
-        });
+        const result = await fetchAnalysisReport(item.id);
+        onLoadReport({ id: item.id, result });
       } catch (err) {
         console.error('Error loading catalog report:', err);
         setLoadError(err instanceof Error ? err.message : uiText.batchLoadReportError);
@@ -253,10 +270,74 @@ export const AnalysisCatalogPage: React.FC<AnalysisCatalogPageProps> = ({
         setLoadingReportId(null);
       }
     },
-    [onLoadReport, uiText]
+    [fetchAnalysisReport, onLoadReport, uiText]
   );
 
-  const activeItems = groupedByCategory[activeCategory];
+  const handleDownloadReport = useCallback(
+    async (item: AnalysisCatalogItem) => {
+      setDownloadingReportId(item.id);
+      setLoadError(null);
+      try {
+        const result = await fetchAnalysisReport(item.id);
+        const content = formatAnalysisStateAsText(result, language);
+        const filename = buildReportTxtFilename(item.ticker, item.companyName, item.completedAt);
+        downloadTextFile(filename, content);
+      } catch (err) {
+        console.error('Error downloading catalog report:', err);
+        setLoadError(err instanceof Error ? err.message : uiText.catalogDownloadError);
+      } finally {
+        setDownloadingReportId(null);
+      }
+    },
+    [fetchAnalysisReport, language, uiText]
+  );
+
+  const handleDownloadCategory = useCallback(async () => {
+    if (activeItems.length === 0 || downloadingCategory) return;
+
+    setDownloadingCategory(true);
+    setCategoryDownloadProgress(null);
+    setLoadError(null);
+
+    try {
+      const reports: Array<{ ticker: string; companyName: string | null; content: string }> = [];
+
+      for (let index = 0; index < activeItems.length; index += 1) {
+        const item = activeItems[index];
+        setCategoryDownloadProgress(
+          uiText.catalogDownloadCategoryProgress
+            .replace('{current}', String(index + 1))
+            .replace('{total}', String(activeItems.length))
+        );
+        const result = await fetchAnalysisReport(item.id);
+        reports.push({
+          ticker: item.ticker,
+          companyName: item.companyName,
+          content: formatAnalysisStateAsText(result, language),
+        });
+      }
+
+      const content = formatCategoryReportsAsText({
+        category: activeCategory,
+        language,
+        reports,
+      });
+      downloadTextFile(buildCategoryTxtFilename(activeCategory, language), content);
+    } catch (err) {
+      console.error('Error downloading category reports:', err);
+      setLoadError(err instanceof Error ? err.message : uiText.catalogDownloadError);
+    } finally {
+      setDownloadingCategory(false);
+      setCategoryDownloadProgress(null);
+    }
+  }, [
+    activeCategory,
+    activeItems,
+    downloadingCategory,
+    fetchAnalysisReport,
+    language,
+    uiText,
+  ]);
 
   const loadedCountLabel = (() => {
     if (items.length === 0) return '';
@@ -321,7 +402,33 @@ export const AnalysisCatalogPage: React.FC<AnalysisCatalogPageProps> = ({
         ) : activeItems.length === 0 ? (
           <div className="py-16 text-center text-gray-400">{uiText.catalogEmptyCategory}</div>
         ) : (
-          <div className="overflow-x-auto rounded-xl border border-gray-700/80">
+          <>
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
+              <p className="text-sm text-gray-400">
+                {uiText[getCatalogCategoryLabelKey(activeCategory)]}
+                {' · '}
+                {activeItems.length}
+              </p>
+              <div className="flex flex-col items-start sm:items-end gap-1">
+                <button
+                  type="button"
+                  onClick={() => void handleDownloadCategory()}
+                  disabled={downloadingCategory || downloadingReportId !== null}
+                  className="inline-flex items-center gap-2 text-xs px-3 py-1.5 rounded-lg border border-gray-600 bg-gray-900/50 hover:bg-gray-700/60 text-gray-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {downloadingCategory ? uiText.catalogDownloadingCategory : uiText.catalogDownloadCategory}
+                </button>
+                {categoryDownloadProgress && (
+                  <span className="text-xs text-gray-500">{categoryDownloadProgress}</span>
+                )}
+                {hasMore && (
+                  <span className="text-xs text-gray-500">
+                    {uiText.catalogDownloadCategoryPartial.replace('{count}', String(activeItems.length))}
+                  </span>
+                )}
+              </div>
+            </div>
+            <div className="overflow-x-auto rounded-xl border border-gray-700/80">
             <table className="w-full min-w-[820px]">
               <thead>
                 <tr className="border-b border-gray-700 bg-gray-900/40">
@@ -409,16 +516,32 @@ export const AnalysisCatalogPage: React.FC<AnalysisCatalogPageProps> = ({
                         {formatDateTime(item.completedAt, language)}
                       </td>
                       <td className="py-3 px-3 whitespace-nowrap">
-                        <button
-                          type="button"
-                          onClick={() => void handleLoadReport(item)}
-                          disabled={loadingReportId === item.id}
-                          className="text-xs px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                          {loadingReportId === item.id
-                            ? uiText.batchLoadingReport
-                            : uiText.batchViewReport}
-                        </button>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => void handleLoadReport(item)}
+                            disabled={loadingReportId === item.id || downloadingReportId === item.id}
+                            className="text-xs px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            {loadingReportId === item.id
+                              ? uiText.batchLoadingReport
+                              : uiText.batchViewReport}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleDownloadReport(item)}
+                            disabled={
+                              downloadingReportId === item.id ||
+                              loadingReportId === item.id ||
+                              downloadingCategory
+                            }
+                            className="text-xs px-3 py-1.5 rounded-lg border border-gray-600 bg-gray-900/50 hover:bg-gray-700/60 text-gray-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            {downloadingReportId === item.id
+                              ? uiText.catalogDownloadingTxt
+                              : uiText.catalogDownloadTxt}
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   );
@@ -426,6 +549,7 @@ export const AnalysisCatalogPage: React.FC<AnalysisCatalogPageProps> = ({
               </tbody>
             </table>
           </div>
+          </>
         )}
 
         {!loadingInitial && loadingMore && (

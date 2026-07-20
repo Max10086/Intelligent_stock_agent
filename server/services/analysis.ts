@@ -17,6 +17,7 @@ import { getFinalConclusionQualityIssues, hasUsableFinalConclusion } from '../..
 import { normalizeInvestmentConclusion } from '../../utils/investmentConclusionNormalize.js';
 import { normalizeFinalConclusion } from '../../utils/finalConclusionNormalize.js';
 import { parseModelJsonResponse } from '../../utils/modelJson.js';
+import { normalizeQuestionList } from '../../utils/coerceQuestionText.js';
 import {
   hasUsableInvestmentConclusion,
   THESIS_SECTION_KEYS,
@@ -56,6 +57,9 @@ import {
   type MaterialEvent,
 } from '../../utils/materialEventsExtract.js';
 import { isUnusableSearchAnswer } from '../../utils/qnaAnswerQuality.js';
+import { getCninfoEvidencePromptBlock, prefetchCninfoFilingsForCompany } from './cninfoService.js';
+import { getEdgarEvidencePromptBlock, prefetchEdgarFilingsForCompany } from './edgarService.js';
+import { mergeOfficialFilingEvidenceBlocks } from '../../utils/officialFilingEvidence.js';
 // FIX: 删除了重复引用，保留这一行正确的
 import { searchTicker, getFinancialData } from '../../services/finance.js';
 import {
@@ -261,8 +265,8 @@ export class AnalysisService {
           },
         },
       });
-      const parsed = parseModelJsonResponse(response.text || '{}') as { questions?: string[] };
-      const questions = Array.isArray(parsed.questions) ? parsed.questions : [];
+      const parsed = parseModelJsonResponse(response.text || '{}') as { questions?: unknown };
+      const questions = normalizeQuestionList(parsed.questions);
       return questions.slice(0, EXPECTATION_GAP_QUESTION_COUNT);
     };
 
@@ -309,8 +313,8 @@ export class AnalysisService {
           },
         },
       });
-      const parsed = parseModelJsonResponse(response.text || '{}') as { questions?: string[] };
-      const questions = Array.isArray(parsed.questions) ? parsed.questions : [];
+      const parsed = parseModelJsonResponse(response.text || '{}') as { questions?: unknown };
+      const questions = normalizeQuestionList(parsed.questions);
       return questions.slice(0, batchSize);
     };
 
@@ -379,7 +383,8 @@ export class AnalysisService {
     question: string,
     company: CompanyProfile,
     lang: Language,
-    onProgress?: (message: string) => void | Promise<void>
+    onProgress?: (message: string) => void | Promise<void>,
+    officialFilingEvidenceBlock?: string
   ): Promise<QnAResult> {
     const outputLanguage = lang === 'cn' ? 'Simplified Chinese' : 'English';
     const now = new Date();
@@ -395,6 +400,7 @@ export class AnalysisService {
       outputLanguage,
       recencyGuidance: buildRecencyGuidance(now, lang),
       lang,
+      officialFilingEvidenceBlock,
     });
     const searchQueries = resolveStrategicEventSearchQueries(question, company, lang);
 
@@ -703,6 +709,21 @@ ${buildQuickTakeIdentityRule(company, lang)}`;
     await reportQnaProgress(completedCount);
 
     if (pendingIndices.length > 0) {
+      const cninfoBundle = await prefetchCninfoFilingsForCompany(company, lang);
+      const edgarBundle = await prefetchEdgarFilingsForCompany(company, lang);
+      const officialFilingEvidenceBlock = mergeOfficialFilingEvidenceBlocks(
+        getCninfoEvidencePromptBlock(cninfoBundle, lang),
+        getEdgarEvidencePromptBlock(edgarBundle, lang)
+      );
+      if (officialFilingEvidenceBlock) {
+        const sourceLabel = cninfoBundle
+          ? 'CNINFO'
+          : edgarBundle
+            ? 'EDGAR'
+            : 'official filings';
+        await log(12, `${sourceLabel} filings loaded`, `Injecting official filing excerpts for ${company.name}`);
+      }
+
       const pendingTasks = pendingIndices.map(index => ({
         index,
         item: questions[index],
@@ -710,7 +731,7 @@ ${buildQuickTakeIdentityRule(company, lang)}`;
 
       await runParallelIndexedTasks<string, QnAResult>(
         pendingTasks,
-        async task => this.answerQuestion(task.item, company, lang),
+        async task => this.answerQuestion(task.item, company, lang, undefined, officialFilingEvidenceBlock),
         {
           concurrency: QNA_CONCURRENCY,
           onTaskComplete: async (result, task) => {

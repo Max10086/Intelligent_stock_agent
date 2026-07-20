@@ -1,4 +1,5 @@
 import type { Language } from '../types.ts';
+import { coerceQuestionText } from './coerceQuestionText.ts';
 
 /** Heuristic: question is mostly English prose when user expects Chinese. */
 export const questionLooksEnglish = (question: string): boolean => {
@@ -19,13 +20,16 @@ export const filterQuestionsForLanguage = (
   lang: Language
 ): { accepted: string[]; rejected: string[] } => {
   if (lang !== 'cn') {
-    return { accepted: questions.filter(q => q?.trim()), rejected: [] };
+    return {
+      accepted: questions.map(coerceQuestionText).filter(q => q.trim()),
+      rejected: [],
+    };
   }
 
   const accepted: string[] = [];
   const rejected: string[] = [];
   for (const question of questions) {
-    const trimmed = question?.trim();
+    const trimmed = coerceQuestionText(question).trim();
     if (!trimmed) continue;
     if (questionLooksEnglish(trimmed)) {
       rejected.push(trimmed);
@@ -42,13 +46,14 @@ export const pickLanguageValidQuestions = async (
   regenerateStrict: () => Promise<string[]>,
   expectedCount?: number
 ): Promise<string[]> => {
-  const target = expectedCount ?? questions.filter(q => q?.trim()).length;
+  const target =
+    expectedCount ?? questions.map(coerceQuestionText).filter(q => q.trim()).length;
 
   const dedupeMerge = (base: string[], extra: string[]): string[] => {
     const seen = new Set(base.map(q => q.replace(/\s+/g, ' ').toLowerCase()));
     const out = [...base];
     for (const q of extra) {
-      const trimmed = q?.trim();
+      const trimmed = coerceQuestionText(q).trim();
       if (!trimmed) continue;
       const key = trimmed.replace(/\s+/g, ' ').toLowerCase();
       if (seen.has(key)) continue;

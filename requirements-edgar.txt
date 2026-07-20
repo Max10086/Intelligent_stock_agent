@@ -1,0 +1,2 @@
+# Optional: US SEC EDGAR filings via edgartools (used by server/scripts/edgarFetch.py)
+edgartools>=5.40.0

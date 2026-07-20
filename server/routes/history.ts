@@ -224,10 +224,21 @@ async function loadHistoryFromDb(userId: string): Promise<AnalysisState[]> {
     return cached;
   }
 
-  const maxItems = Number(process.env.HISTORY_MAX_ITEMS) || 50;
-  const { history } = await loadHistoryPageFromDb(userId, maxItems, 0, { includeTotal: false });
-  setCachedHistory(userId, history);
-  return history;
+  const pageSize = Number(process.env.HISTORY_PAGE_SIZE) || 50;
+  let offset = 0;
+  let merged: AnalysisState[] = [];
+  let hasMore = true;
+
+  while (hasMore) {
+    const page = await loadHistoryPageFromDb(userId, pageSize, offset, { includeTotal: false });
+    merged = dedupeHistoryByJobId([...merged, ...page.history]);
+    hasMore = page.hasMore;
+    offset += page.history.length;
+    if (!page.history.length) break;
+  }
+
+  setCachedHistory(userId, merged);
+  return merged;
 }
 
 /**
@@ -348,10 +359,10 @@ router.post('/', requireAuth, async (req, res) => {
 router.get('/', requireAuthLite, async (req, res) => {
   try {
     const userId = req.user!.id;
-    const maxItems = Number(process.env.HISTORY_MAX_ITEMS) || 50;
-    const limit = Math.min(Math.max(Number(req.query.limit) || maxItems, 1), maxItems);
+    const defaultPageSize = Number(process.env.HISTORY_PAGE_SIZE) || 50;
+    const limit = Math.max(Number(req.query.limit) || defaultPageSize, 1);
     const offset = Math.max(Number(req.query.offset) || 0, 0);
-    const wantsFullList = limit >= maxItems && offset === 0;
+    const wantsFullList = req.query.all === 'true' && offset === 0;
 
     if (wantsFullList) {
       const cached = getCachedHistory(userId);

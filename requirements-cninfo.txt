@@ -1,0 +1,6 @@
+# Optional: A-share official filings from cninfo.com.cn (used by server/scripts/cninfoFetch.py)
+requests>=2.31
+pymupdf>=1.24
+
+# Optional upstream CLI (if you prefer rollysys/use_cninfo directly):
+# git+https://github.com/rollysys/use_cninfo.git

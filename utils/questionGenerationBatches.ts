@@ -1,3 +1,5 @@
+import { coerceQuestionText } from './coerceQuestionText.ts';
+
 /** Per-batch LLM timeout for question generation (thinking mode can exceed 120s). */
 export const QUESTION_GENERATION_BATCH_TIMEOUT_MS = 210_000;
 
@@ -144,7 +146,7 @@ export function dedupeQuestions(questions: string[]): string[] {
   const seen = new Set<string>();
   const result: string[] = [];
   for (const question of questions) {
-    const trimmed = question?.trim();
+    const trimmed = coerceQuestionText(question).trim();
     if (!trimmed) continue;
     const key = trimmed.replace(/\s+/g, ' ').toLowerCase();
     if (seen.has(key)) continue;
