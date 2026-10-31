@@ -4,6 +4,7 @@ import {
   buildSecSearchQueries,
   normalizeInstitutionCik,
   normalizeInstitutionQuery,
+  parseInstitutionCikQuery,
   resolveAliasCik,
   resolveInstitutionCik,
   scoreInstitutionMatch,
@@ -13,7 +14,7 @@ import {
   THIRTEEN_F_INSTITUTION_CATALOG,
 } from './thirteenFMockData.js';
 import { isThirteenFLiveDataEnabled } from './thirteenFEdgarService.js';
-import { fetchSecCompanyProfiles } from '../lib/secSubmissionsClient.js';
+import { fetchSecCompanyProfile, fetchSecCompanyProfiles } from '../lib/secSubmissionsClient.js';
 import { secFetchJson } from '../lib/secRequestClient.js';
 
 interface SecSearchHit {
@@ -139,7 +140,9 @@ const catalogCikSet = (): Set<string> =>
 const rankInstitutions = (
   institutions: InstitutionSearchRow[],
   query: string,
-  aliasCik: string | null
+  aliasCik: string | null,
+  cikQuery: string | null,
+  exactCikCiks: Set<string>
 ): ThirteenFInstitution[] => {
   const knownCiks = catalogCikSet();
   const normalizedQuery = normalizeInstitutionQuery(query).toLowerCase();
@@ -152,6 +155,9 @@ const rankInstitutions = (
         inCatalog: knownCiks.has(inst.cik),
         aliasHit: resolvedAliasCik === inst.cik,
         latestFilingDate: inst.latestFilingDate,
+        exactCikMatch: exactCikCiks.has(normalizeInstitutionCik(inst.cik)),
+        institutionCik: inst.cik,
+        cikQuery,
       }),
     }))
     .filter(row => row.score >= 25);
@@ -170,6 +176,9 @@ const rankInstitutions = (
             inCatalog: knownCiks.has(inst.cik),
             aliasHit: resolvedAliasCik === inst.cik,
             latestFilingDate: inst.latestFilingDate,
+            exactCikMatch: exactCikCiks.has(normalizeInstitutionCik(inst.cik)),
+            institutionCik: inst.cik,
+            cikQuery,
           }),
         }));
 
@@ -226,12 +235,49 @@ const collectLocalMatches = (query: string): ThirteenFInstitution[] => {
     return THIRTEEN_F_INSTITUTION_CATALOG.slice(0, 12);
   }
 
-  return THIRTEEN_F_INSTITUTION_CATALOG.filter(
-    item =>
+  const cikQuery = parseInstitutionCikQuery(query);
+  const digitSuffix = cikQuery?.replace(/^0+/, '') ?? normalized.replace(/\D/g, '');
+
+  return THIRTEEN_F_INSTITUTION_CATALOG.filter(item => {
+    const itemCik = normalizeInstitutionCik(item.cik);
+    if (cikQuery && itemCik === cikQuery) return true;
+    if (digitSuffix.length >= 3 && itemCik.includes(digitSuffix)) return true;
+    return (
       item.name.toLowerCase().includes(normalized) ||
       item.shortName?.toLowerCase().includes(normalized) ||
-      item.cik.includes(normalized)
-  );
+      itemCik.includes(normalized.replace(/\D/g, ''))
+    );
+  });
+};
+
+const lookupInstitutionByCik = async (cikInput: string): Promise<ThirteenFInstitution | null> => {
+  const cik = resolveInstitutionCik(cikInput);
+  const catalogHit = getInstitutionByCik(cik);
+
+  if (isThirteenFLiveDataEnabled()) {
+    try {
+      const profile = await fetchSecCompanyProfile(cik);
+      if (profile?.name) {
+        const shortName =
+          profile.name.length > 28 ? `${profile.name.slice(0, 25).trim()}…` : profile.name;
+        return {
+          cik: profile.cik,
+          name: profile.name,
+          shortName,
+          formerNames: profile.formerNames.length > 0 ? profile.formerNames : undefined,
+          description: catalogHit?.description,
+          latestQuarter: catalogHit?.latestQuarter,
+        };
+      }
+    } catch (error) {
+      console.warn(
+        `[13f] CIK profile lookup failed for ${cik}:`,
+        error instanceof Error ? error.message : error
+      );
+    }
+  }
+
+  return catalogHit ?? null;
 };
 
 export const searchInstitutionsRanked = async (
@@ -244,6 +290,8 @@ export const searchInstitutionsRanked = async (
 
   const aliasCik = resolveAliasCik(normalizedQuery);
   const aliasInstitution = aliasCik ? getInstitutionByCik(aliasCik) : undefined;
+  const cikQuery = parseInstitutionCikQuery(normalizedQuery);
+  const exactCikCiks = new Set<string>();
 
   const merged = new Map<string, InstitutionSearchRow>();
 
@@ -259,7 +307,15 @@ export const searchInstitutionsRanked = async (
     });
   }
 
-  if (isThirteenFLiveDataEnabled() && normalizedQuery.length >= 2) {
+  if (cikQuery) {
+    exactCikCiks.add(cikQuery);
+    const byCik = await lookupInstitutionByCik(cikQuery);
+    if (byCik) {
+      mergeInstitution(merged, { ...byCik, latestFilingDate: undefined });
+    }
+  }
+
+  if (isThirteenFLiveDataEnabled() && normalizedQuery.length >= 2 && !cikQuery) {
     try {
       const secResults = await searchInstitutionsFromSecMulti(normalizedQuery);
       for (const item of secResults) {
@@ -273,7 +329,13 @@ export const searchInstitutionsRanked = async (
     }
   }
 
-  const ranked = rankInstitutions([...merged.values()], normalizedQuery, aliasCik);
+  const ranked = rankInstitutions(
+    [...merged.values()],
+    normalizedQuery,
+    aliasCik,
+    cikQuery,
+    exactCikCiks
+  );
   if (isThirteenFLiveDataEnabled() && ranked.length > 0) {
     try {
       return await enrichInstitutionsWithSecProfiles(ranked);

@@ -67,6 +67,40 @@ const LEGAL_SUFFIX_PATTERN =
 export const normalizeInstitutionQuery = (query: string): string =>
   query.trim().replace(/\s+/g, ' ');
 
+/** True when the query is numeric / CIK-shaped (not a name search). */
+export const isInstitutionCikSearchQuery = (query: string): boolean => {
+  const trimmed = normalizeInstitutionQuery(query);
+  if (!trimmed) return false;
+  if (/^cik[\s#:-]*\d{1,10}$/i.test(trimmed)) return true;
+  return /^\d{3,10}$/.test(trimmed.replace(/\s/g, ''));
+};
+
+/** Minimum characters before firing institution search (CIK allows 3 digits). */
+export const institutionSearchMinQueryLength = (query: string): number =>
+  isInstitutionCikSearchQuery(query) ? 3 : 2;
+
+/**
+ * Parse user input into a 10-digit institution CIK when the query is CIK-shaped.
+ * Supports `1350694`, `0001350694`, `CIK 1350694`, etc.
+ */
+export const parseInstitutionCikQuery = (query: string): string | null => {
+  const trimmed = normalizeInstitutionQuery(query);
+  if (!trimmed) return null;
+
+  let digits = '';
+  const cikPrefix = trimmed.match(/^cik[\s#:-]*(\d{1,10})$/i);
+  if (cikPrefix) {
+    digits = cikPrefix[1] ?? '';
+  } else if (/^\d{3,10}$/.test(trimmed.replace(/\s/g, ''))) {
+    digits = trimmed.replace(/\D/g, '');
+  } else {
+    return null;
+  }
+
+  if (digits.length < 3 || digits.length > 10) return null;
+  return normalizeInstitutionCik(digits);
+};
+
 export const tokenizeInstitutionQuery = (query: string): string[] =>
   normalizeInstitutionQuery(query)
     .toLowerCase()
@@ -112,14 +146,32 @@ export const buildSecSearchQueries = (rawQuery: string): string[] => {
 export const scoreInstitutionMatch = (
   name: string,
   query: string,
-  options?: { inCatalog?: boolean; aliasHit?: boolean; latestFilingDate?: string }
+  options?: {
+    inCatalog?: boolean;
+    aliasHit?: boolean;
+    latestFilingDate?: string;
+    exactCikMatch?: boolean;
+    institutionCik?: string;
+    cikQuery?: string | null;
+  }
 ): number => {
   const normalizedQuery = normalizeInstitutionQuery(query).toLowerCase();
   if (!normalizedQuery) return 0;
 
+  if (options?.exactCikMatch) return 600;
+
+  const cikQuery = options?.cikQuery ? parseInstitutionCikQuery(options.cikQuery) : null;
+  if (cikQuery && options?.institutionCik && normalizeInstitutionCik(options.institutionCik) === cikQuery) {
+    return 580;
+  }
+
   const normalizedName = name.toLowerCase();
   const tokens = tokenizeInstitutionQuery(normalizedQuery);
   let score = 0;
+
+  if (cikQuery && normalizedName.includes(cikQuery.replace(/^0+/, ''))) {
+    score += 40;
+  }
 
   if (options?.aliasHit) score += 250;
   if (options?.inCatalog) score += 30;

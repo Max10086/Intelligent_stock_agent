@@ -24,6 +24,7 @@ import type {
 } from '../types/thirteenF.ts';
 import { apiFetch, readApiError } from '../utils/authenticatedFetch.ts';
 import {
+  institutionSearchMinQueryLength,
   normalizeInstitutionCik,
   resolveInstitutionCik,
 } from '../utils/thirteenFInstitutionSearch.ts';
@@ -1281,7 +1282,7 @@ export const useThirteenFTracker = (language: Language, enabled: boolean) => {
   useEffect(() => {
     if (!enabled) return;
     const query = institutionSearchQuery.trim();
-    if (query.length < 2) {
+    if (query.length < institutionSearchMinQueryLength(query)) {
       setInstitutionSearchResults([]);
       setInstitutionSearchLoading(false);
       return;
