@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactECharts from 'echarts-for-react';
 import type { EChartsOption } from 'echarts';
+import type { CallbackDataParams } from 'echarts/types/dist/shared';
 import type { ThirteenFConsensusStock } from '../../../types/thirteenF.ts';
 import { formatUsdCompact } from '../../../utils/thirteenFFormat.ts';
 import {
@@ -20,6 +21,28 @@ interface ConsensusStockBubbleChartProps {
   /** Override default chart height (px). */
   height?: number;
 }
+
+type BubbleScatterPoint = {
+  name: string;
+  value: [number, number, number, number];
+  symbolSize: number;
+  itemStyle: {
+    color: string;
+    opacity: number;
+    borderColor: string;
+    borderWidth: number;
+    borderType: 'dashed' | 'solid';
+  };
+  label: {
+    show: boolean;
+    formatter: string;
+    color: string;
+    fontSize: number;
+    fontWeight: number;
+    rich?: Record<string, { color: string; fontSize: number; fontWeight: number }>;
+  };
+  displayItem: ConsensusBubbleDisplayItem;
+};
 
 export const ConsensusStockBubbleChart: React.FC<ConsensusStockBubbleChartProps> = ({
   stocks,
@@ -79,7 +102,7 @@ export const ConsensusStockBubbleChart: React.FC<ConsensusStockBubbleChartProps>
           opacity: isCluster ? 0.72 : 0.9,
           borderColor: isCluster ? '#fbbf24' : isBuy ? '#34d399' : '#f87171',
           borderWidth: isCluster ? 2 : 1,
-          borderType: isCluster ? 'dashed' : 'solid',
+          borderType: (isCluster ? 'dashed' : 'solid') as 'dashed' | 'solid',
         },
         label: {
           show:
@@ -103,8 +126,49 @@ export const ConsensusStockBubbleChart: React.FC<ConsensusStockBubbleChartProps>
             : undefined,
         },
         displayItem: item,
-      };
+      } satisfies BubbleScatterPoint;
     });
+
+    const formatTooltip = (params: CallbackDataParams | CallbackDataParams[]): string => {
+      const raw = Array.isArray(params) ? params[0] : params;
+      const displayItem = (raw?.data as BubbleScatterPoint | undefined)?.displayItem;
+      if (!displayItem) {
+        return '';
+      }
+
+      if (displayItem.kind === 'cluster' && displayItem.cluster) {
+        const cluster = displayItem.cluster;
+        const direction = cluster.direction === 'BUY' ? buyLabel : sellLabel;
+        const preview = cluster.stocks
+          .slice(0, 6)
+          .map(stock => `${stock.ticker} (${formatUsdCompact(stock.netMarketValueDeltaUsd)})`)
+          .join('<br/>');
+        const remainder =
+          cluster.stocks.length > 6
+            ? `<br/>+${cluster.stocks.length - 6} ${stocksLabel}`
+            : '';
+        return [
+          `<strong>${cluster.stocks.length} ${stocksLabel}</strong> · ${direction}`,
+          `${cluster.institutionCount} institutions · avg ${formatUsdCompact(cluster.centroidY)}`,
+          `Total ${formatUsdCompact(cluster.netDeltaUsd)}`,
+          preview + remainder,
+          clusterExpandLabel,
+        ].join('<br/>');
+      }
+
+      const item = displayItem.stock;
+      const direction = item.direction === 'BUY' ? buyLabel : sellLabel;
+      const institutions = item.institutions.map(inst => inst.name).join(', ');
+      const collapseHint =
+        displayItem.kind === 'member' ? `<br/>${clusterCollapseLabel}` : '';
+      return [
+        `<strong>${item.ticker}</strong> · ${item.name}`,
+        `${direction} · ${item.institutionCount} · ${item.sector}`,
+        formatUsdCompact(item.netMarketValueDeltaUsd),
+        institutions,
+        collapseHint,
+      ].join('<br/>');
+    };
 
     return {
       grid,
@@ -113,47 +177,7 @@ export const ConsensusStockBubbleChart: React.FC<ConsensusStockBubbleChartProps>
         backgroundColor: 'rgba(17,24,39,0.95)',
         borderColor: '#374151',
         textStyle: { color: '#e5e7eb', fontSize: 12 },
-        formatter: (params: {
-          data?: { displayItem?: ConsensusBubbleDisplayItem };
-        }) => {
-          const displayItem = params.data?.displayItem;
-          if (!displayItem) {
-            return '';
-          }
-
-          if (displayItem.kind === 'cluster' && displayItem.cluster) {
-            const cluster = displayItem.cluster;
-            const direction = cluster.direction === 'BUY' ? buyLabel : sellLabel;
-            const preview = cluster.stocks
-              .slice(0, 6)
-              .map(stock => `${stock.ticker} (${formatUsdCompact(stock.netMarketValueDeltaUsd)})`)
-              .join('<br/>');
-            const remainder =
-              cluster.stocks.length > 6
-                ? `<br/>+${cluster.stocks.length - 6} ${stocksLabel}`
-                : '';
-            return [
-              `<strong>${cluster.stocks.length} ${stocksLabel}</strong> · ${direction}`,
-              `${cluster.institutionCount} institutions · avg ${formatUsdCompact(cluster.centroidY)}`,
-              `Total ${formatUsdCompact(cluster.netDeltaUsd)}`,
-              preview + remainder,
-              clusterExpandLabel,
-            ].join('<br/>');
-          }
-
-          const item = displayItem.stock;
-          const direction = item.direction === 'BUY' ? buyLabel : sellLabel;
-          const institutions = item.institutions.map(inst => inst.name).join(', ');
-          const collapseHint =
-            displayItem.kind === 'member' ? `<br/>${clusterCollapseLabel}` : '';
-          return [
-            `<strong>${item.ticker}</strong> · ${item.name}`,
-            `${direction} · ${item.institutionCount} · ${item.sector}`,
-            formatUsdCompact(item.netMarketValueDeltaUsd),
-            institutions,
-            collapseHint,
-          ].join('<br/>');
-        },
+        formatter: formatTooltip,
       },
       xAxis: {
         name: 'Institutions',
@@ -182,7 +206,7 @@ export const ConsensusStockBubbleChart: React.FC<ConsensusStockBubbleChartProps>
       series: [
         {
           type: 'scatter',
-          data: seriesData,
+          data: seriesData as BubbleScatterPoint[],
           markLine: {
             silent: true,
             symbol: 'none',

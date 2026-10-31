@@ -195,7 +195,7 @@ export const InstitutionDetailPanel: React.FC<InstitutionDetailPanelProps> = ({
                 {ui.thirteenFCacheFetchedAt.replace(
                   '{time}',
                   new Date(holdings.cacheFetchedAt).toLocaleString(
-                    language === 'zh' ? 'zh-CN' : 'en-US'
+                    language === 'cn' ? 'zh-CN' : 'en-US'
                   )
                 )}
               </p>

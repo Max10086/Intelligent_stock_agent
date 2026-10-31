@@ -127,7 +127,7 @@ export const PerformanceTrackingPanel: React.FC<PerformanceTrackingPanelProps> =
               {ui.thirteenFCacheFetchedAt.replace(
                 '{time}',
                 new Date(performanceCacheFetchedAt).toLocaleString(
-                  language === 'zh' ? 'zh-CN' : 'en-US'
+                  language === 'cn' ? 'zh-CN' : 'en-US'
                 )
               )}
             </p>
