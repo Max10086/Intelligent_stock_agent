@@ -75,14 +75,19 @@ const isValidCrumb = (crumb: string): boolean =>
   !/too many requests/i.test(crumb) &&
   /^[\w./-]+$/.test(crumb);
 
-/** curl + cookie jar — reliable for Yahoo screener when Node fetch is rate-limited behind SOCKS. */
-export const postYahooScreenerViaCurl = async (params: {
-  url: string;
-  body: string;
-}): Promise<{ statusCode: number; body: string }> => {
+const withYahooCurlSession = async <T>(
+  run: (params: {
+    runRequest: (params: {
+      url: string;
+      method?: 'GET' | 'POST';
+      body?: string;
+    }) => Promise<{ statusCode: number; body: string }>;
+    crumb: string;
+  }) => Promise<T>
+): Promise<T> => {
   let lastError: YahooCurlError | null = null;
 
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
     const dir = await mkdtemp(join(tmpdir(), 'yahoo-curl-'));
     const cookieJarPath = join(dir, 'cookies.txt');
 
@@ -102,29 +107,19 @@ export const postYahooScreenerViaCurl = async (params: {
         );
       }
 
-      const screenerUrl = `${params.url}${params.url.includes('?') ? '&' : '?'}crumb=${encodeURIComponent(crumb)}`;
-      const screenerRes = await runCurl({
-        url: screenerUrl,
-        method: 'POST',
-        body: params.body,
-        cookieJarPath,
-      });
+      const runRequest = (params: {
+        url: string;
+        method?: 'GET' | 'POST';
+        body?: string;
+      }) => runCurl({ ...params, cookieJarPath });
 
-      if (screenerRes.statusCode < 200 || screenerRes.statusCode >= 300) {
-        throw new YahooCurlError(
-          `Yahoo screener failed (${screenerRes.statusCode})`,
-          screenerRes.statusCode,
-          screenerRes.body
-        );
-      }
-
-      return screenerRes;
+      return await run({ runRequest, crumb });
     } catch (error) {
       if (error instanceof YahooCurlError) {
         lastError = error;
         const isRateLimited =
           error.statusCode === 429 || /too many requests/i.test(error.body);
-        if (!isRateLimited || attempt === 3) {
+        if (!isRateLimited || attempt === 2) {
           throw error;
         }
         await new Promise(resolve => setTimeout(resolve, 5000 * attempt));
@@ -136,7 +131,72 @@ export const postYahooScreenerViaCurl = async (params: {
     }
   }
 
-  throw lastError ?? new Error('Yahoo screener curl request failed');
+  throw lastError ?? new Error('Yahoo curl session failed');
 };
 
+/** curl + cookie jar — reliable for Yahoo screener when Node fetch is rate-limited behind SOCKS. */
+export const postYahooScreenerViaCurl = async (params: {
+  url: string;
+  body: string;
+}): Promise<{ statusCode: number; body: string }> => {
+  const [response] = await withYahooCurlSession(async ({ runRequest, crumb }) => {
+    const screenerUrl = `${params.url}${params.url.includes('?') ? '&' : '?'}crumb=${encodeURIComponent(crumb)}`;
+    const screenerRes = await runRequest({
+      url: screenerUrl,
+      method: 'POST',
+      body: params.body,
+    });
+
+    if (screenerRes.statusCode < 200 || screenerRes.statusCode >= 300) {
+      throw new YahooCurlError(
+        `Yahoo screener failed (${screenerRes.statusCode})`,
+        screenerRes.statusCode,
+        screenerRes.body
+      );
+    }
+
+    return [screenerRes];
+  });
+
+  return response;
+};
+
+/** One Yahoo session — multiple GET requests (e.g. batched quote lookups). */
+export const getYahooJsonBatchesViaCurl = async (
+  buildUrls: (crumb: string) => string[]
+): Promise<Array<{ statusCode: number; body: string }>> =>
+  withYahooCurlSession(async ({ runRequest, crumb }) => {
+    const responses: Array<{ statusCode: number; body: string }> = [];
+    for (const url of buildUrls(crumb)) {
+      const res = await runRequest({ url });
+      if (res.statusCode === 429) {
+        throw new YahooCurlError('Yahoo request rate limited (429)', 429, res.body);
+      }
+      responses.push(res);
+    }
+    return responses;
+  });
+
 export const shouldUseYahooCurlClient = (): boolean => Boolean(getGoogleSocksProxyUrl());
+
+/** Chart v8 works without crumb when routed through SOCKS; screener endpoints still need a session. */
+export const getYahooChartViaCurl = async (
+  chartUrl: string
+): Promise<{ statusCode: number; body: string }> => {
+  const proxy = getGoogleSocksProxyUrl();
+  const args = [
+    '-sS',
+    '-m',
+    '45',
+    '-w',
+    `${HTTP_STATUS_MARKER}%{http_code}`,
+    '-H',
+    `User-Agent: ${getYahooUserAgent()}`,
+  ];
+  if (proxy) {
+    args.push('--proxy', proxy);
+  }
+  args.push(chartUrl);
+  const { stdout } = await execFileAsync('curl', args, { maxBuffer: 16 * 1024 * 1024 });
+  return parseCurlResponse(stdout);
+};

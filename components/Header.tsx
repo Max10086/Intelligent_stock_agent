@@ -15,10 +15,11 @@ interface HeaderProps {
   onLanguageChange: (lang: Language) => void;
   /** Hidden on the idle search home where the input form is the entry point. */
   showNewAnalysisButton?: boolean;
-  currentView?: 'single' | 'batch' | 'compare' | 'gainers' | 'catalog';
+  currentView?: 'single' | 'batch' | 'compare' | 'gainers' | 'catalog' | '13f';
   onViewChange?: (view: 'single' | 'batch') => void;
   onOpenGainers?: () => void;
   onOpenCatalog?: () => void;
+  onOpen13F?: () => void;
   showStepTimeline?: boolean;
   onToggleStepTimeline?: () => void;
   userEmail?: string | null;
@@ -39,6 +40,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenCompare,
   onOpenGainers,
   onOpenCatalog,
+  onOpen13F,
   language,
   onLanguageChange,
   showNewAnalysisButton = true,
@@ -133,6 +135,19 @@ export const Header: React.FC<HeaderProps> = ({
               }`}
             >
               {uiText.catalogNav}
+            </button>
+          )}
+          {onOpen13F && (
+            <button
+              type="button"
+              onClick={onOpen13F}
+              className={`px-3 py-2 text-sm font-medium rounded-md focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-gray-900 focus:ring-blue-500 transition-colors ${
+                currentView === '13f'
+                  ? 'bg-violet-700 text-white hover:bg-violet-600'
+                  : 'text-gray-200 bg-gray-700 hover:bg-gray-600'
+              }`}
+            >
+              {uiText.thirteenFNav}
             </button>
           )}
           {onOpenGainers && (

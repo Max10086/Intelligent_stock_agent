@@ -404,7 +404,12 @@ export async function retryFailedJob(jobId: string, userId: string): Promise<Que
   if (!job) {
     throw new Error('Job not found');
   }
-  if (job.status !== 'FAILED') {
+
+  const retryable =
+    job.status === 'FAILED' ||
+    (job.status === 'PENDING' && Boolean(job.error?.trim()));
+
+  if (!retryable) {
     throw new Error('Only failed jobs can be retried');
   }
 

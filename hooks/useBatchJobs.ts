@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import { Language, AnalysisState } from '../types.ts';
 import { apiFetch, getAuthToken, readApiError } from '../utils/authenticatedFetch.ts';
 
-const QUEUE_CACHE_KEY = 'intelligent-stock-agent:batch-queue-v1';
+const QUEUE_CACHE_KEY = 'intelligent-stock-agent:batch-queue-v2';
 const QUEUE_POLL_MS = 15000;
 const QUEUE_POLL_ACTIVE_MS = 5000;
 
@@ -88,8 +88,39 @@ function writeQueueCache(status: QueueDashboardState) {
   }
 }
 
+function reconcileFailedJobState(job: QueueJobItem): QueueJobItem {
+  const failedPrefix = job.currentStep?.startsWith('Failed:');
+  const hasError = Boolean(job.error?.trim());
+
+  if (job.status === 'FAILED') {
+    return job;
+  }
+
+  if (hasError || failedPrefix) {
+    return {
+      ...job,
+      status: 'FAILED',
+      error: job.error ?? (failedPrefix ? job.currentStep!.replace(/^Failed:\s*/, '') : job.error),
+    };
+  }
+
+  return job;
+}
+
+export function isJobRetryable(job: Pick<QueueJobItem, 'status' | 'error' | 'currentStep'>): boolean {
+  if (job.status === 'FAILED') return true;
+  if (job.status === 'PENDING' && Boolean(job.error?.trim())) return true;
+  if (
+    job.status === 'PROCESSING' &&
+    (Boolean(job.error?.trim()) || Boolean(job.currentStep?.startsWith('Failed:')))
+  ) {
+    return true;
+  }
+  return false;
+}
+
 function normalizeQueueJob(job: Partial<QueueJobItem> & { id: string; ticker: string; status: string }): QueueJobItem {
-  return {
+  return reconcileFailedJobState({
     id: job.id,
     ticker: job.ticker,
     companyName: job.companyName ?? null,
@@ -116,56 +147,65 @@ function normalizeQueueJob(job: Partial<QueueJobItem> & { id: string; ticker: st
     error: job.error ?? null,
     hasCheckpoint: Boolean(job.hasCheckpoint),
     logs: job.logs ?? null,
+  });
+}
+
+function preserveDisplayFields(prev: QueueJobItem | undefined, job: QueueJobItem): QueueJobItem {
+  if (!prev) return job;
+  return {
+    ...job,
+    overallConclusion: job.overallConclusion?.trim() ? job.overallConclusion : prev.overallConclusion,
+    companyName: job.companyName?.trim() ? job.companyName : prev.companyName,
+    currentPrice: job.currentPrice?.trim() ? job.currentPrice : prev.currentPrice,
+    currency: job.currency?.trim() ? job.currency : prev.currency,
   };
 }
 
-function mergeQueueJobs(incoming: QueueJobItem[], existing: QueueJobItem[]): QueueJobItem[] {
+function applyServerJob(
+  prev: QueueJobItem | undefined,
+  incoming: QueueJobItem,
+  retryInFlight: boolean
+): QueueJobItem {
+  const job = preserveDisplayFields(prev, reconcileFailedJobState(incoming));
+
+  if (retryInFlight) {
+    return {
+      ...job,
+      status: 'PENDING',
+      error: null,
+      completedAt: null,
+      currentStep: job.hasCheckpoint ? 'Queued — resume from checkpoint' : 'Queued for retry',
+    };
+  }
+
+  if (prev?.status === 'COMPLETED' && job.status !== 'COMPLETED') {
+    return preserveDisplayFields(prev, { ...prev, ...job, status: 'COMPLETED' });
+  }
+
+  return job;
+}
+
+function mergeQueueJobs(
+  incoming: QueueJobItem[],
+  existing: QueueJobItem[],
+  retryInFlightIds?: Set<string>
+): QueueJobItem[] {
   const byId = new Map<string, QueueJobItem>();
   for (const job of existing) {
     byId.set(job.id, job);
   }
   for (const job of incoming) {
     const prev = byId.get(job.id);
-    byId.set(job.id, prev ? mergeQueueJobUpdate(prev, job) : job);
+    byId.set(
+      job.id,
+      prev
+        ? applyServerJob(prev, job, retryInFlightIds?.has(job.id) ?? false)
+        : reconcileFailedJobState(job)
+    );
   }
   return Array.from(byId.values()).sort(
     (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
   );
-}
-
-/** Keep stable list fields when a stale poll returns nulls or regresses status. */
-function mergeQueueJobUpdate(prev: QueueJobItem, incoming: QueueJobItem): QueueJobItem {
-  const merged: QueueJobItem = { ...prev, ...incoming };
-
-  if (!incoming.overallConclusion?.trim() && prev.overallConclusion?.trim()) {
-    merged.overallConclusion = prev.overallConclusion;
-  }
-  if (!incoming.companyName?.trim() && prev.companyName?.trim()) {
-    merged.companyName = prev.companyName;
-  }
-  if (!incoming.currentPrice?.trim() && prev.currentPrice?.trim()) {
-    merged.currentPrice = prev.currentPrice;
-  }
-  if (!incoming.currency?.trim() && prev.currency?.trim()) {
-    merged.currency = prev.currency;
-  }
-
-  // Completed is terminal — ignore stale polls that show in-progress states.
-  if (prev.status === 'COMPLETED' && incoming.status !== 'COMPLETED') {
-    merged.status = prev.status;
-    merged.progress = Math.max(prev.progress ?? 0, incoming.progress ?? 0);
-    merged.completedAt = prev.completedAt ?? incoming.completedAt;
-  } else if (prev.status === 'PROCESSING' && incoming.status === 'PENDING') {
-    // Ignore stale poll showing queued while worker is still running.
-    merged.status = prev.status;
-    merged.progress = Math.max(prev.progress ?? 0, incoming.progress ?? 0);
-  } else if (prev.status === 'FAILED' && incoming.status === 'PENDING') {
-    // Retry clears error; accept the fresh queued state.
-    merged.error = incoming.error ?? null;
-    merged.completedAt = incoming.completedAt ?? null;
-  }
-
-  return merged;
 }
 
 function prependOptimisticJobs(
@@ -198,12 +238,20 @@ export const useBatchJobs = (options?: UseBatchJobsOptions) => {
   const [activeBatchJobId, setActiveBatchJobId] = useState<string | null>(null);
   const [batchJobStatus, setBatchJobStatus] = useState<BatchJobStatus | null>(null);
   const [isPolling, setIsPolling] = useState(false);
-  const [queueStatus, setQueueStatus] = useState<QueueDashboardState | null>(() => readQueueCache());
+  const [queueStatus, setQueueStatus] = useState<QueueDashboardState | null>(() => {
+    const cached = readQueueCache();
+    if (!cached) return null;
+    return {
+      ...cached,
+      jobs: cached.jobs.map(job => reconcileFailedJobState(normalizeQueueJob(job))),
+    };
+  });
   const [queueFetchError, setQueueFetchError] = useState<string | null>(null);
   const queueStatusRef = useRef(queueStatus);
   queueStatusRef.current = queueStatus;
   const queueFetchGenerationRef = useRef(0);
   const queueFetchInFlightRef = useRef(false);
+  const retryInFlightJobIdsRef = useRef<Set<string>>(new Set());
 
   const applyQueueStatus = useCallback((next: QueueDashboardState) => {
     setQueueStatus(next);
@@ -243,7 +291,7 @@ export const useBatchJobs = (options?: UseBatchJobsOptions) => {
       const prevById = new Map(prevJobs.map(job => [job.id, job]));
       const mergedJobs = transformedJobs.map(job => {
         const prev = prevById.get(job.id);
-        return prev ? mergeQueueJobUpdate(prev, job) : job;
+        return applyServerJob(prev, job, retryInFlightJobIdsRef.current.has(job.id));
       });
 
       const next: QueueDashboardState = {
@@ -377,10 +425,13 @@ export const useBatchJobs = (options?: UseBatchJobsOptions) => {
 
   const retryFailedJob = useCallback(
     async (jobId: string) => {
+      retryInFlightJobIdsRef.current.add(jobId);
       setQueueStatus(prev => {
         if (!prev) return prev;
         const job = prev.jobs.find(j => j.id === jobId);
-        if (!job || job.status !== 'FAILED') return prev;
+        if (!job || !isJobRetryable(job)) {
+          return prev;
+        }
 
         const jobs = prev.jobs.map(j =>
           j.id === jobId
@@ -402,17 +453,30 @@ export const useBatchJobs = (options?: UseBatchJobsOptions) => {
         return next;
       });
 
-      const response = await apiFetch(`/api/jobs/${jobId}/retry`, { method: 'POST' });
-      if (!response.ok) {
+      try {
+        const response = await apiFetch(`/api/jobs/${jobId}/retry`, { method: 'POST' });
+        if (!response.ok) {
+          throw new Error(await parseErrorResponse(response));
+        }
+        setIsPolling(true);
         await fetchQueueStatus();
-        throw new Error(await parseErrorResponse(response));
+        return response.json();
+      } catch (error) {
+        await fetchQueueStatus();
+        throw error;
+      } finally {
+        retryInFlightJobIdsRef.current.delete(jobId);
       }
-      setIsPolling(true);
-      await fetchQueueStatus();
-      return response.json();
     },
     [fetchQueueStatus]
   );
+
+  const retryAllFailedJobs = useCallback(async () => {
+    const ids = (queueStatusRef.current?.jobs.filter(isJobRetryable) ?? []).map(job => job.id);
+    for (const id of ids) {
+      await retryFailedJob(id);
+    }
+  }, [retryFailedJob]);
 
   const clearBatchJob = useCallback(() => {
     setActiveBatchJobId(null);
@@ -431,5 +495,6 @@ export const useBatchJobs = (options?: UseBatchJobsOptions) => {
     fetchBatchJobStatus,
     clearBatchJob,
     retryFailedJob,
+    retryAllFailedJobs,
   };
 };

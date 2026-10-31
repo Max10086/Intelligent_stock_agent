@@ -15,12 +15,13 @@ import { ComparePage } from './components/ComparePage.tsx';
 import { HistorySidebar } from './components/HistorySidebar.tsx';
 import { AdminDashboard } from './components/AdminDashboard.tsx';
 import { GainerLeaderboardPage } from './components/GainerLeaderboardPage.tsx';
+import { ThirteenFTrackerPage } from './components/thirteenF/ThirteenFTrackerPage.tsx';
 import { AnalysisCatalogPage } from './components/AnalysisCatalogPage.tsx';
 import { invalidateAnalysisCatalogCache } from './hooks/useAnalysisCatalog.ts';
 import { FeedbackModal } from './components/FeedbackModal.tsx';
 import { useCompanyCompare } from './hooks/useCompanyCompare.ts';
 import { AnalysisStepTimeline } from './components/AnalysisStepTimeline.tsx';
-import { getUIText, BRAND, FEATURE_BATCH_QUEUE, FEATURE_GAINER_LEADERBOARD } from './constants.ts';
+import { getUIText, BRAND, FEATURE_BATCH_QUEUE, FEATURE_GAINER_LEADERBOARD, FEATURE_13F_TRACKER } from './constants.ts';
 import { useAuth } from './hooks/useAuth.ts';
 import { LoginPage } from './components/LoginPage.tsx';
 import { UsageBanner } from './components/UsageBanner.tsx';
@@ -51,7 +52,7 @@ const persistStepTimelinePreference = (visible: boolean) => {
   }
 };
 
-type ViewMode = 'single' | 'batch' | 'compare' | 'gainers' | 'catalog';
+type ViewMode = 'single' | 'batch' | 'compare' | 'gainers' | 'catalog' | '13f';
 
 const App: React.FC = () => {
   const [language, setLanguage] = useState<Language>(() => readStoredUiLanguage() ?? 'en');
@@ -129,6 +130,7 @@ const App: React.FC = () => {
     submitBatchJob,
     fetchQueueStatus,
     retryFailedJob,
+    retryAllFailedJobs,
   } = useBatchJobs({
     queuePollingEnabled:
       authReady && FEATURE_BATCH_QUEUE && currentView === 'batch',
@@ -359,6 +361,7 @@ const App: React.FC = () => {
     currentView !== 'compare' &&
     currentView !== 'gainers' &&
     currentView !== 'catalog' &&
+    currentView !== '13f' &&
     !showBatchStatus &&
     !isViewingCompanyReport;
 
@@ -617,6 +620,7 @@ const App: React.FC = () => {
         onOpenCatalog={
           FEATURE_BATCH_QUEUE ? () => setCurrentView('catalog') : undefined
         }
+        onOpen13F={FEATURE_13F_TRACKER ? () => setCurrentView('13f') : undefined}
         userEmail={auth.user?.email ?? auth.session?.user?.email ?? null}
         onSignOut={() => void auth.signOut()}
         showUpgradeButton={!isPaidMember}
@@ -709,6 +713,8 @@ const App: React.FC = () => {
                     });
                 }}
               />
+            ) : FEATURE_13F_TRACKER && currentView === '13f' ? (
+              <ThirteenFTrackerPage language={language} enabled={authReady} />
             ) : FEATURE_GAINER_LEADERBOARD && isAdmin && currentView === 'gainers' ? (
               <GainerLeaderboardPage
                 language={language}
@@ -725,6 +731,7 @@ const App: React.FC = () => {
                 onRefreshQueue={() => void fetchQueueStatus()}
                 submitBatchJob={submitBatchJob}
                 retryFailedJob={retryFailedJob}
+                retryAllFailedJobs={retryAllFailedJobs}
                 runtimeModelConfig={runtimeModelConfig}
                 onConfigApplied={applyRuntimeModelConfig}
                 isAdmin={isAdmin}

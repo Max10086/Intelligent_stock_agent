@@ -43,6 +43,8 @@ export type ModelCallStep =
   | 'market_gainer_fetch_us'
   | 'market_gainer_fetch_cn'
   | 'market_gainer_blurb_us'
+  | 'sector_lookup'
+  | 'stake_item4_summary'
   | 'cross_company_compare'
   | 'cross_company_compare_follow_up'
   | 'custom';
@@ -120,6 +122,8 @@ const DEEPSEEK_ALWAYS_NO_THINKING_STEPS = new Set<ModelCallStep>([
   'market_gainer_fetch_us',
   'market_gainer_fetch_cn',
   'market_gainer_blurb_us',
+  'sector_lookup',
+  'stake_item4_summary',
 ]);
 
 /** Needs factual recall + structured JSON — medium thinking. */

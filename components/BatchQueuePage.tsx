@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useMemo } from 'react';
 import { Language, AnalysisState, RuntimeModelConfig } from '../types.ts';
 import { getUIText } from '../constants.ts';
-import { QueueDashboardState, QueueJobItem } from '../hooks/useBatchJobs.ts';
+import { QueueDashboardState, QueueJobItem, isJobRetryable } from '../hooks/useBatchJobs.ts';
 import { useCatalogCumulativeReturns } from '../hooks/useCatalogCumulativeReturns.ts';
 import { apiFetch } from '../utils/authenticatedFetch.ts';
 import { AnalysisModeSplitButton } from './AnalysisModeSplitButton.tsx';
@@ -16,6 +16,7 @@ interface BatchQueuePageProps {
   onRefreshQueue: () => void;
   submitBatchJob: (tickers: string, language: Language) => Promise<unknown>;
   retryFailedJob?: (jobId: string) => Promise<unknown>;
+  retryAllFailedJobs?: () => Promise<void>;
   onLoadReport?: (payload: { id: string; result: AnalysisState }) => void;
   onRefreshHistory?: () => void;
   runtimeModelConfig: RuntimeModelConfig;
@@ -53,6 +54,7 @@ export const BatchQueuePage: React.FC<BatchQueuePageProps> = ({
   onRefreshQueue,
   submitBatchJob,
   retryFailedJob,
+  retryAllFailedJobs,
   onLoadReport,
   onRefreshHistory,
   runtimeModelConfig,
@@ -64,6 +66,7 @@ export const BatchQueuePage: React.FC<BatchQueuePageProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [loadingReportId, setLoadingReportId] = useState<string | null>(null);
   const [retryingJobId, setRetryingJobId] = useState<string | null>(null);
+  const [retryingAll, setRetryingAll] = useState(false);
   const uiText = getUIText(language);
 
   const returnTrackItems = useMemo(
@@ -291,8 +294,22 @@ export const BatchQueuePage: React.FC<BatchQueuePageProps> = ({
     [retryFailedJob]
   );
 
-  const canResumeJob = (job: QueueJobItem) =>
-    job.status === 'FAILED' && Boolean(job.hasCheckpoint);
+  const canResumeJob = (job: QueueJobItem) => isJobRetryable(job) && Boolean(job.hasCheckpoint);
+
+  const failedJobs = (queueStatus?.jobs ?? []).filter(isJobRetryable);
+
+  const handleRetryAll = useCallback(async () => {
+    if (!retryAllFailedJobs || failedJobs.length === 0) return;
+    setRetryingAll(true);
+    setError(null);
+    try {
+      await retryAllFailedJobs();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to retry jobs');
+    } finally {
+      setRetryingAll(false);
+    }
+  }, [retryAllFailedJobs, failedJobs.length]);
 
   const stats = queueStatus?.stats ?? { pending: 0, processing: 0, completed: 0, failed: 0 };
 
@@ -350,6 +367,16 @@ export const BatchQueuePage: React.FC<BatchQueuePageProps> = ({
               <ArrowPathIcon className="h-3.5 w-3.5" />
               {uiText.batchRefresh}
             </button>
+            {failedJobs.length > 0 && retryAllFailedJobs ? (
+              <button
+                type="button"
+                onClick={() => void handleRetryAll()}
+                disabled={retryingAll || Boolean(retryingJobId)}
+                className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border border-amber-500/40 bg-amber-950/30 hover:bg-amber-900/40 text-amber-200 transition-colors disabled:opacity-60"
+              >
+                {retryingAll ? uiText.batchRetrying : uiText.batchRetryAll.replace('{count}', String(failedJobs.length))}
+              </button>
+            ) : null}
           </div>
 
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4 sm:max-w-xl sm:w-full">
@@ -467,7 +494,7 @@ export const BatchQueuePage: React.FC<BatchQueuePageProps> = ({
                             </>
                           )}
 
-                          {job.status === 'FAILED' && job.error && (
+                          {isJobRetryable(job) && job.error && (
                             <div className="text-xs text-red-300/90 line-clamp-2" title={job.error}>
                               {job.error}
                             </div>
@@ -483,7 +510,7 @@ export const BatchQueuePage: React.FC<BatchQueuePageProps> = ({
                           >
                             {loadingReportId === job.id ? uiText.batchLoadingReport : uiText.batchViewReport}
                           </button>
-                        ) : job.status === 'FAILED' && retryFailedJob ? (
+                        ) : isJobRetryable(job) && retryFailedJob ? (
                           <button
                             type="button"
                             onClick={() => void handleRetryJob(job)}

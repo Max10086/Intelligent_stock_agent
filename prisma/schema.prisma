@@ -305,3 +305,60 @@ model UserGainerPreference {
   language             String   @default("cn")
   updatedAt            DateTime @updatedAt
 }
+
+/** Cached SEC 13F bundle (holdings + changes) per institution/quarter. */
+model ThirteenFBundleCache {
+  id              String   @id @default(uuid())
+  cik             String
+  quarter         String
+  institutionName String
+  filingDate      String
+  payload         String
+  fetchedAt       DateTime @default(now())
+  expiresAt       DateTime
+
+  @@unique([cik, quarter])
+  @@index([cik, quarter(sort: Desc)])
+  @@index([expiresAt])
+}
+
+/** Persistent ticker → GICS sector map (static seed + LLM lookups). */
+model TickerSectorCache {
+  ticker      String   @id
+  sector      String
+  industry    String?
+  companyName String?
+  source      String   @default("llm")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([sector])
+  @@index([updatedAt(sort: Desc)])
+}
+
+/** Parsed SC 13D / 13G filing fields (ownership %, Item 4 cache). */
+model ThirteenFStakeFilingCache {
+  accessionNumber      String    @id
+  filerCik             String
+  filerName            String?
+  targetCompanyCik     String?
+  targetCompanyName    String?
+  fileNumber           String?
+  formType             String
+  filingDate           String
+  ownershipPct         Float?
+  priorOwnershipPct    Float?
+  sharesOwned          Float?
+  stakeChangeType      String?
+  item4Text            String?
+  item4Summary         String?
+  item4SummaryStatus   String    @default("pending")
+  parseStatus          String    @default("pending")
+  parsedAt             DateTime?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  @@index([filerCik, targetCompanyCik, filingDate(sort: Desc)])
+  @@index([filerCik, targetCompanyName, filingDate(sort: Desc)])
+  @@index([fileNumber, filingDate(sort: Desc)])
+}

@@ -19,6 +19,10 @@ import {
   formatAnalysisStateAsText,
   formatCategoryReportsAsText,
 } from '../utils/reportTextExport.ts';
+import {
+  computeCatalogCategoryWinRate,
+  formatCatalogWinRateLabel,
+} from '../utils/catalogWinRate.ts';
 import { BrandMark } from './BrandMark.tsx';
 import { ArrowPathIcon } from './icons.tsx';
 
@@ -66,10 +70,11 @@ const cardShellClass =
 const StatCard: React.FC<{
   label: string;
   value: number;
+  winRateLabel: string | null;
   active: boolean;
   tone: 'emerald' | 'green' | 'teal' | 'yellow' | 'red';
   onClick: () => void;
-}> = ({ label, value, active, tone, onClick }) => {
+}> = ({ label, value, winRateLabel, active, tone, onClick }) => {
   const toneClass = {
     emerald: active
       ? 'border-emerald-400/60 bg-emerald-950/40 text-emerald-200 ring-1 ring-emerald-400/40'
@@ -96,6 +101,9 @@ const StatCard: React.FC<{
     >
       <div className="text-2xl font-bold tabular-nums">{value}</div>
       <div className="mt-1 text-xs text-gray-400">{label}</div>
+      {winRateLabel ? (
+        <div className="mt-1.5 text-[11px] tabular-nums text-gray-300">{winRateLabel}</div>
+      ) : null}
     </button>
   );
 };
@@ -239,6 +247,31 @@ export const AnalysisCatalogPage: React.FC<AnalysisCatalogPageProps> = ({
   );
 
   const activeItems = groupedByCategory[activeCategory];
+
+  const winRatesByCategory = React.useMemo(() => {
+    const rates: Partial<
+      Record<ConclusionCategory, ReturnType<typeof computeCatalogCategoryWinRate>>
+    > = {};
+    for (const category of CATALOG_DISPLAY_CATEGORIES) {
+      rates[category] = computeCatalogCategoryWinRate(
+        groupedByCategory[category],
+        returnsById,
+        category
+      );
+    }
+    return rates;
+  }, [groupedByCategory, returnsById]);
+
+  const activeWinRateLabel = formatCatalogWinRateLabel(
+    winRatesByCategory[activeCategory] ?? {
+      winCount: 0,
+      totalCount: 0,
+      winRatePct: null,
+      scoredCount: 0,
+      ready: false,
+    },
+    uiText.catalogWinRateLoading
+  );
 
   const fetchAnalysisReport = useCallback(
     async (id: string): Promise<AnalysisState> => {
@@ -385,6 +418,16 @@ export const AnalysisCatalogPage: React.FC<AnalysisCatalogPageProps> = ({
               key={category}
               label={uiText[getCatalogCategoryLabelKey(category)]}
               value={categoryCounts[category]}
+              winRateLabel={formatCatalogWinRateLabel(
+                winRatesByCategory[category] ?? {
+                  winCount: 0,
+                  totalCount: 0,
+                  winRatePct: null,
+                  scoredCount: 0,
+                  ready: false,
+                },
+                uiText.catalogWinRateLoading
+              )}
               active={activeCategory === category}
               tone={getCategoryTone(category)}
               onClick={() => handleSelectCategory(category)}
@@ -408,6 +451,12 @@ export const AnalysisCatalogPage: React.FC<AnalysisCatalogPageProps> = ({
                 {uiText[getCatalogCategoryLabelKey(activeCategory)]}
                 {' · '}
                 {activeItems.length}
+                {activeWinRateLabel ? (
+                  <>
+                    {' · '}
+                    {uiText.catalogWinRate} {activeWinRateLabel}
+                  </>
+                ) : null}
               </p>
               <div className="flex flex-col items-start sm:items-end gap-1">
                 <button
