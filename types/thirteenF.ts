@@ -35,6 +35,14 @@ export interface ThirteenFWatchlistResponse {
   presets: ThirteenFInstitution[];
 }
 
+/** Synced 13F tracker UI state (watchlist, stars, Important Tracking selection). */
+export interface ThirteenFUserTrackerState {
+  watchlist: ThirteenFWatchlistItem[];
+  starredCiks: string[];
+  stakeCiks: string[];
+  stakeLookbackDays: ThirteenFStakeLookbackDays;
+}
+
 export interface ThirteenFQuarterOption {
   quarter: ThirteenFQuarterId;
   filingDate: string;

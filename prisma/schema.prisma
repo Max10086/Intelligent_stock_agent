@@ -51,6 +51,7 @@ model User {
   returnTrackingAnchors ReturnTrackingAnchor[]
   feedback              UserFeedback[]
   gainerPreference      UserGainerPreference?
+  thirteenFTrackerState UserThirteenFTrackerState?
 
   @@index([createdAt])
   @@index([paidAt])
@@ -304,6 +305,17 @@ model UserGainerPreference {
   maxAutoTickersPerRun Int      @default(5)
   language             String   @default("cn")
   updatedAt            DateTime @updatedAt
+}
+
+/** Per-user 13F watchlist and Important Tracking preferences (syncs across devices). */
+model UserThirteenFTrackerState {
+  userId            String   @id
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  watchlistJson     String   @default("[]")
+  starredCiksJson   String   @default("[]")
+  stakeCiksJson     String   @default("[]")
+  stakeLookbackDays Int      @default(180)
+  updatedAt         DateTime @updatedAt
 }
 
 /** Cached SEC 13F bundle (holdings + changes) per institution/quarter. */

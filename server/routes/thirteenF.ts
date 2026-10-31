@@ -36,6 +36,11 @@ import {
   invalidateStakeFeedCache,
 } from '../services/thirteenFStakeService.js';
 import { getThirteenFCacheStatus } from '../services/thirteenFEdgarService.js';
+import {
+  getUserThirteenFTrackerState,
+  saveUserThirteenFTrackerState,
+} from '../services/thirteenFUserStateService.js';
+import type { ThirteenFUserTrackerState } from '../../types/thirteenF.js';
 
 const router = express.Router();
 
@@ -77,6 +82,38 @@ router.get('/institutions/search', async (req, res) => {
 
 router.get('/presets', (_req, res) => {
   res.json({ ok: true, data: { presets: getPresetsMock() } });
+});
+
+router.get('/user-state', async (req, res) => {
+  try {
+    const state = await getUserThirteenFTrackerState(req.user!.id);
+    res.json({ ok: true, data: state });
+  } catch (error) {
+    console.error('[13f] user-state get failed:', error);
+    res.status(500).json({
+      ok: false,
+      error: error instanceof Error ? error.message : 'Failed to load 13F preferences',
+    });
+  }
+});
+
+router.put('/user-state', async (req, res) => {
+  try {
+    const body = (req.body ?? {}) as Partial<ThirteenFUserTrackerState>;
+    const state = await saveUserThirteenFTrackerState(req.user!.id, {
+      watchlist: Array.isArray(body.watchlist) ? body.watchlist : [],
+      starredCiks: Array.isArray(body.starredCiks) ? body.starredCiks : [],
+      stakeCiks: Array.isArray(body.stakeCiks) ? body.stakeCiks : [],
+      stakeLookbackDays: body.stakeLookbackDays ?? 180,
+    });
+    res.json({ ok: true, data: state });
+  } catch (error) {
+    console.error('[13f] user-state save failed:', error);
+    res.status(500).json({
+      ok: false,
+      error: error instanceof Error ? error.message : 'Failed to save 13F preferences',
+    });
+  }
 });
 
 router.get('/institutions/:cik/quarters', async (req, res) => {

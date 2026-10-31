@@ -19,6 +19,7 @@ import type {
   ThirteenFStakeLookbackDays,
   ThirteenFStakeParseResponse,
   ThirteenFTrackerPanel,
+  ThirteenFUserTrackerState,
   ThirteenFWatchlistItem,
 } from '../types/thirteenF.ts';
 import { apiFetch, readApiError } from '../utils/authenticatedFetch.ts';
@@ -153,6 +154,25 @@ const readStakeLookback = (): ThirteenFStakeLookbackDays => {
   return 180;
 };
 
+const buildWatchlistFromPresets = (presets: ThirteenFInstitution[]): ThirteenFWatchlistItem[] =>
+  presets.map((inst, index) => ({
+    cik: resolveInstitutionCik(inst.cik),
+    name: inst.shortName ?? inst.name,
+    addedAt: new Date().toISOString(),
+    sortOrder: index,
+  }));
+
+const readLocalTrackerState = (): ThirteenFUserTrackerState => {
+  const watchlist = readWatchlist();
+  const starredCiks = [...readStarredCiks()];
+  return {
+    watchlist,
+    starredCiks,
+    stakeCiks: [...readStakeCiks(watchlist, readStarredCiks())],
+    stakeLookbackDays: readStakeLookback(),
+  };
+};
+
 const unwrapData = <T,>(payload: unknown): T => {
   const body = payload as { ok?: boolean; data?: T; error?: string };
   if (body?.ok === false) {
@@ -264,6 +284,8 @@ export const useThirteenFTracker = (language: Language, enabled: boolean) => {
     field: holdingsSort.field,
     dir: holdingsSort.dir,
   });
+  const [userStateReady, setUserStateReady] = useState(false);
+  const skipPersistUserStateRef = useRef(true);
 
   useEffect(() => {
     writeStakeCiks(stakeCiks);
@@ -1024,19 +1046,103 @@ export const useThirteenFTracker = (language: Language, enabled: boolean) => {
   }, [enabled, loadPresets]);
 
   useEffect(() => {
-    if (!enabled || watchlist.length > 0 || presets.length === 0) return;
-    const defaultInst = presets.find(item => item.cik === DEFAULT_CIK) ?? presets[0];
-    if (!defaultInst) return;
-    setWatchlist([
-      {
-        cik: defaultInst.cik,
-        name: defaultInst.shortName ?? defaultInst.name,
-        addedAt: new Date().toISOString(),
-        sortOrder: 0,
-      },
-    ]);
-    setSelectedCik(defaultInst.cik);
-  }, [enabled, presets, watchlist.length]);
+    if (!enabled) {
+      setUserStateReady(false);
+      return;
+    }
+
+    let cancelled = false;
+    setUserStateReady(false);
+    skipPersistUserStateRef.current = true;
+
+    void (async () => {
+      try {
+        const response = await apiFetch('/api/13f/user-state');
+        if (cancelled || !response.ok) return;
+
+        const remote = unwrapData<ThirteenFUserTrackerState>(await response.json());
+        skipPersistUserStateRef.current = true;
+
+        if (remote.watchlist.length > 0) {
+          const migrated = remote.watchlist.map(migrateWatchlistItem);
+          setWatchlist(migrated);
+          setStarredCiks(new Set(remote.starredCiks.map(resolveInstitutionCik)));
+          setStakeCiks(new Set(remote.stakeCiks.map(resolveInstitutionCik)));
+          setStakeLookbackDays(remote.stakeLookbackDays);
+          setSelectedCik(migrated[0]?.cik ?? DEFAULT_CIK);
+          return;
+        }
+
+        const local = readLocalTrackerState();
+        const likelyLegacyAutoSeed =
+          local.watchlist.length === 1 &&
+          resolveInstitutionCik(local.watchlist[0]!.cik) === DEFAULT_CIK;
+        if (local.watchlist.length > 0 && !likelyLegacyAutoSeed) {
+          setWatchlist(local.watchlist);
+          setStarredCiks(new Set(local.starredCiks));
+          setStakeCiks(new Set(local.stakeCiks));
+          setStakeLookbackDays(local.stakeLookbackDays);
+          setSelectedCik(local.watchlist[0]?.cik ?? DEFAULT_CIK);
+          skipPersistUserStateRef.current = true;
+          await apiFetch('/api/13f/user-state', {
+            method: 'PUT',
+            body: JSON.stringify(local),
+          });
+        }
+      } catch (loadStateError) {
+        console.warn(
+          '[13f] user state load failed:',
+          loadStateError instanceof Error ? loadStateError.message : loadStateError
+        );
+      } finally {
+        if (!cancelled) {
+          setUserStateReady(true);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [enabled]);
+
+  useEffect(() => {
+    if (!enabled || !userStateReady) return;
+    if (skipPersistUserStateRef.current) {
+      skipPersistUserStateRef.current = false;
+      return;
+    }
+
+    const payload: ThirteenFUserTrackerState = {
+      watchlist,
+      starredCiks: [...starredCiks],
+      stakeCiks: [...stakeCiks],
+      stakeLookbackDays,
+    };
+
+    const timer = window.setTimeout(() => {
+      void apiFetch('/api/13f/user-state', {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      }).catch(saveError => {
+        console.warn(
+          '[13f] user state save failed:',
+          saveError instanceof Error ? saveError.message : saveError
+        );
+      });
+    }, 700);
+
+    return () => window.clearTimeout(timer);
+  }, [enabled, userStateReady, watchlist, starredCiks, stakeCiks, stakeLookbackDays]);
+
+  useEffect(() => {
+    if (!enabled || !userStateReady || watchlist.length > 0 || presets.length === 0) return;
+    const seeded = buildWatchlistFromPresets(presets);
+    if (seeded.length === 0) return;
+    skipPersistUserStateRef.current = true;
+    setWatchlist(seeded);
+    setSelectedCik(seeded[0]?.cik ?? DEFAULT_CIK);
+  }, [enabled, presets, userStateReady, watchlist.length]);
 
   useEffect(() => {
     if (!enabled || activePanel !== 'institution') return;
