@@ -137,7 +137,17 @@ export const fetchThirteenFBundleViaPython = async (params: {
     child.stderr.on('data', chunk => {
       stderr += String(chunk);
     });
-    child.on('error', reject);
+    child.on('error', error => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        reject(
+          new Error(
+            `Python not found (${python}). Cloud Run image must install python3 and edgartools (see requirements-edgar.txt).`
+          )
+        );
+        return;
+      }
+      reject(error);
+    });
     child.on('close', code => {
       try {
         const parsed = JSON.parse(stdout || '{}') as ThirteenFEdgarRawBundle & { error?: string };

@@ -36,6 +36,13 @@
     FROM node:20-alpine AS runner
     
     WORKDIR /app
+
+    # SEC 13F live data (thirteenFFetch.py) requires Python + edgartools on Cloud Run.
+    COPY --from=builder /app/requirements-edgar.txt ./requirements-edgar.txt
+    RUN apk add --no-cache python3 py3-pip \
+      && pip3 install --no-cache-dir --break-system-packages -r requirements-edgar.txt \
+      && python3 -c "from edgar import Company; print('edgartools ready')"
+    ENV EDGAR_PYTHON=python3
     
     # 暂时不强制设置 production，确保 tsx 能读取 devDependencies
     # ENV NODE_ENV=production
