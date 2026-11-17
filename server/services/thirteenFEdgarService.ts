@@ -29,6 +29,10 @@ import {
 import { computeChangeCounts } from '../../utils/thirteenFFormat.js';
 import { sortHoldingsRows } from '../../utils/thirteenFHoldingsSort.js';
 import { resolveInstitutionCik } from '../../utils/thirteenFInstitutionSearch.js';
+import {
+  compareThirteenFQuarters,
+  inferExpectedLatest13FQuarter,
+} from '../../utils/thirteenFQuarterCalendar.js';
 import { fetchSecCompanyProfile } from '../lib/secSubmissionsClient.js';
 import {
   applySectorEnrichment,
@@ -52,6 +56,30 @@ const bundleHasHoldingsDeltas = (bundle: ThirteenFEdgarRawBundle): boolean =>
   );
 
 /** Pre-v2 DB cache entries lack quarter-over-quarter fields on holdings. */
+/** Latest-view requests (no quarter) must refetch when a newer 13F season is due on the calendar. */
+const isLatestQuarterViewStale = (
+  bundle: ThirteenFEdgarRawBundle,
+  quarter: ThirteenFQuarterId | null | undefined
+): boolean => {
+  if (quarter) return false;
+
+  const expectedLatest = inferExpectedLatest13FQuarter();
+  if (compareThirteenFQuarters(bundle.summary.quarter, expectedLatest) < 0) {
+    return true;
+  }
+
+  const listedLatest = bundle.availableQuarters.find(item => item.isLatest)?.quarter
+    ?? bundle.availableQuarters[0]?.quarter;
+  if (
+    listedLatest &&
+    compareThirteenFQuarters(bundle.summary.quarter, listedLatest) < 0
+  ) {
+    return true;
+  }
+
+  return false;
+};
+
 const isStaleHoldingsCache = (bundle: ThirteenFEdgarRawBundle): boolean => {
   if ((bundle.schemaVersion ?? 0) >= BUNDLE_SCHEMA_VERSION) {
     return false;
@@ -71,10 +99,13 @@ const isStaleHoldingsCache = (bundle: ThirteenFEdgarRawBundle): boolean => {
   return false;
 };
 
-const readMemoryCache = (key: string): ThirteenFEdgarRawBundle | null => {
+const readMemoryCache = (
+  key: string,
+  quarter: ThirteenFQuarterId | null | undefined
+): ThirteenFEdgarRawBundle | null => {
   const hit = readThirteenFMemoryCache(key);
   if (!hit) return null;
-  if (isStaleHoldingsCache(hit)) {
+  if (isStaleHoldingsCache(hit) || isLatestQuarterViewStale(hit, quarter)) {
     clearThirteenFMemoryCacheEntry(key);
     return null;
   }
@@ -238,13 +269,17 @@ const getCachedBundle = async (
     clearThirteenFMemoryCacheEntry(key);
     inflightFetches.delete(key);
   } else {
-    const memoryHit = readMemoryCache(key);
+    const memoryHit = readMemoryCache(key, quarter);
     if (memoryHit) {
       return memoryHit;
     }
 
     const dbHit = await getThirteenFBundleFromDbCache(resolvedCik, quarter);
-    if (dbHit && !isStaleHoldingsCache(dbHit)) {
+    if (dbHit && isLatestQuarterViewStale(dbHit, quarter)) {
+      console.info(
+        `[13f] cached latest is ${dbHit.summary.quarter}; expected ${inferExpectedLatest13FQuarter()} — refetching SEC`
+      );
+    } else if (dbHit && !isStaleHoldingsCache(dbHit)) {
       const prepared = await prepareBundle(dbHit);
       if ((dbHit.schemaVersion ?? 0) < BUNDLE_SCHEMA_VERSION) {
         await saveThirteenFBundleToDbCache(prepared);
@@ -254,7 +289,7 @@ const getCachedBundle = async (
       return prepared;
     }
 
-    if (dbHit && isStaleHoldingsCache(dbHit)) {
+    if (dbHit && !isLatestQuarterViewStale(dbHit, quarter) && isStaleHoldingsCache(dbHit)) {
       const backfilled = backfillHoldingsDeltasFromChanges(dbHit);
       if (!isStaleHoldingsCache(backfilled)) {
         const prepared = await prepareBundle(backfilled);

@@ -1,4 +1,5 @@
 import type { ThirteenFQuarterId } from '../../types/thirteenF.js';
+import { compareThirteenFQuarters } from '../../utils/thirteenFQuarterCalendar.js';
 import { prisma, withPrismaRetry } from '../db.js';
 import type { ThirteenFEdgarRawBundle } from '../lib/thirteenFEdgarClient.js';
 
@@ -10,17 +11,7 @@ export const normalizeThirteenFCik = (cik: string): string => cik.replace(/\D/g,
 /** @deprecated TTL no longer used; kept for status endpoint compatibility. */
 export const getThirteenFCacheTtlMs = (): number => 0;
 
-export const compareQuarters = (a: string, b: string): number => {
-  const parse = (quarter: string): [number, number] => {
-    const match = /^(\d{4})-Q([1-4])$/.exec(quarter);
-    if (!match) return [0, 0];
-    return [Number(match[1]), Number(match[2])];
-  };
-  const [ay, aq] = parse(a);
-  const [by, bq] = parse(b);
-  if (ay !== by) return ay - by;
-  return aq - bq;
-};
+export const compareQuarters = compareThirteenFQuarters;
 
 const parsePayload = (payload: string): ThirteenFEdgarRawBundle | null => {
   try {

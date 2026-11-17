@@ -4,6 +4,10 @@ import type {
   ThirteenFQuarterOption,
 } from '../../types/thirteenF.js';
 import { normalizeInstitutionCik } from '../../utils/thirteenFInstitutionSearch.js';
+import {
+  buildRollingQuarterCalendar,
+  priorThirteenFQuarter,
+} from '../../utils/thirteenFQuarterCalendar.js';
 
 /** Searchable 13F filers (mock catalog; real SEC ingest will extend this). */
 export const THIRTEEN_F_INSTITUTION_CATALOG: ThirteenFInstitution[] = [
@@ -272,14 +276,8 @@ const INSTITUTION_SEEDS: Record<string, SeedHolding[]> = {
   })),
 };
 
-export const QUARTER_CALENDAR: ThirteenFQuarterOption[] = [
-  { quarter: '2026-Q2', filingDate: '2026-08-14', reportDate: '2026-06-30', isLatest: true },
-  { quarter: '2026-Q1', filingDate: '2026-05-15', reportDate: '2026-03-31', isLatest: false },
-  { quarter: '2025-Q4', filingDate: '2026-02-14', reportDate: '2025-12-31', isLatest: false },
-  { quarter: '2025-Q2', filingDate: '2025-08-14', reportDate: '2025-06-30', isLatest: false },
-  { quarter: '2025-Q1', filingDate: '2025-05-15', reportDate: '2025-03-31', isLatest: false },
-  { quarter: '2024-Q4', filingDate: '2025-02-14', reportDate: '2024-12-31', isLatest: false },
-];
+/** Computed at process start from the SEC 13F filing calendar (not a fixed historical list). */
+export const QUARTER_CALENDAR: ThirteenFQuarterOption[] = buildRollingQuarterCalendar();
 
 const TOTAL_AUM_USD = 17_250_000_000;
 
@@ -311,7 +309,7 @@ export const priorQuarter = (quarter: ThirteenFQuarterId): ThirteenFQuarterId =>
   if (idx >= 0 && idx < QUARTER_CALENDAR.length - 1) {
     return QUARTER_CALENDAR[idx + 1].quarter;
   }
-  return '2025-Q1';
+  return priorThirteenFQuarter(quarter);
 };
 
 export const scaleAumForQuarter = (quarter: ThirteenFQuarterId): number => {
